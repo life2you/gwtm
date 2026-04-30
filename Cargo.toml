@@ -1,0 +1,15 @@
+[package]
+name = "gwtm"
+version = "0.1.0"
+edition = "2024"
+description = "Git Worktree Manager for Rust-oriented workflows"
+license = "MIT"
+homepage = "https://github.com/life2you/gwtm"
+repository = "https://github.com/life2you/gwtm"
+
+[dependencies]
+anyhow = "1.0"
+dialoguer = "0.12"
+dirs = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
