@@ -52,6 +52,7 @@ Files related to Homebrew publishing:
 
 - `packaging/homebrew-tap/Formula/gwtm.rb`
 - `packaging/homebrew-tap/README.md`
+- `RELEASING.md`
 - `scripts/update-homebrew-formula.sh`
 
 Recommended release flow:
