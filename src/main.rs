@@ -5,12 +5,11 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dialoguer::{Input, theme::ColorfulTheme};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -56,22 +55,6 @@ struct WorktreeEntry {
     bare: bool,
 }
 
-enum AppExit {
-    Quit,
-    Reconfigure,
-}
-
-enum SetupWizardOutcome {
-    Completed(AppConfig),
-    Cancelled,
-}
-
-enum PromptFlow {
-    Submit(PathBuf),
-    Back,
-    Cancel,
-}
-
 #[derive(Clone, Copy)]
 enum ProjectIntent {
     Create,
@@ -89,6 +72,15 @@ enum Page {
     BranchInput {
         project_idx: usize,
         input: tui::InputState,
+    },
+    ConfigProjectsRoot {
+        input: tui::InputState,
+        initial_setup: bool,
+    },
+    ConfigWorktreesRoot {
+        projects_root: PathBuf,
+        input: tui::InputState,
+        initial_setup: bool,
     },
     BaseBranchSelect {
         project_idx: usize,
@@ -130,23 +122,36 @@ enum LoopAction {
     Push(Page),
     Pop,
     ResetToMain,
-    Exit(AppExit),
+    Exit,
 }
 
 struct FullScreenApp {
     config: AppConfig,
+    config_path: PathBuf,
     projects: Vec<Project>,
+    start_with_setup: bool,
 }
 
 impl FullScreenApp {
-    fn new(config: AppConfig) -> Self {
+    fn new(config: AppConfig, config_path: PathBuf) -> Self {
         Self {
             config,
+            config_path,
             projects: Vec::new(),
+            start_with_setup: false,
         }
     }
 
-    fn run(&mut self) -> Result<AppExit> {
+    fn new_for_setup(config: AppConfig, config_path: PathBuf) -> Self {
+        Self {
+            config,
+            config_path,
+            projects: Vec::new(),
+            start_with_setup: true,
+        }
+    }
+
+    fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
@@ -162,15 +167,16 @@ impl FullScreenApp {
         result
     }
 
-    fn main_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> Result<AppExit> {
-        let mut pages = vec![Page::MainMenu(self.main_menu_page())];
+    fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        let mut pages = if self.start_with_setup {
+            vec![self.config_projects_root_page(true)]
+        } else {
+            vec![Page::MainMenu(self.main_menu_page())]
+        };
 
         loop {
             let Some(page) = pages.last_mut() else {
-                return Ok(AppExit::Quit);
+                return Ok(());
             };
 
             let action = match page {
@@ -209,10 +215,12 @@ impl FullScreenApp {
                                 }
                             }
                         }
-                        Some(tui::MenuAction::Select(4)) => LoopAction::Exit(AppExit::Reconfigure),
+                        Some(tui::MenuAction::Select(4)) => {
+                            LoopAction::Push(self.config_projects_root_page(false))
+                        }
                         Some(tui::MenuAction::Select(5))
                         | Some(tui::MenuAction::Back)
-                        | Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        | Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -249,7 +257,7 @@ impl FullScreenApp {
                             },
                         },
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -265,7 +273,70 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::InputAction::Back) => LoopAction::Pop,
-                        Some(tui::InputAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::InputAction::Quit) => LoopAction::Exit,
+                        None => LoopAction::None,
+                    }
+                }
+                Page::ConfigProjectsRoot {
+                    input,
+                    initial_setup,
+                } => {
+                    terminal.draw(|frame| input.render(frame))?;
+                    match input.handle_key_event() {
+                        Some(tui::InputAction::Submit(value)) => {
+                            match validate_directory_input(&value, true) {
+                                Ok(projects_root) => LoopAction::Push(
+                                    self.config_worktrees_root_page(projects_root, *initial_setup),
+                                ),
+                                Err(err) => {
+                                    input.error = Some(err.to_string());
+                                    LoopAction::None
+                                }
+                            }
+                        }
+                        Some(tui::InputAction::Back) => {
+                            if *initial_setup {
+                                LoopAction::Exit
+                            } else {
+                                LoopAction::Pop
+                            }
+                        }
+                        Some(tui::InputAction::Quit) => LoopAction::Exit,
+                        None => LoopAction::None,
+                    }
+                }
+                Page::ConfigWorktreesRoot {
+                    projects_root,
+                    input,
+                    initial_setup,
+                } => {
+                    terminal.draw(|frame| input.render(frame))?;
+                    match input.handle_key_event() {
+                        Some(tui::InputAction::Submit(value)) => {
+                            match self.apply_config_paths(projects_root.clone(), &value) {
+                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    "gwtm / 配置结果",
+                                    if *initial_setup {
+                                        "初始化完成"
+                                    } else {
+                                        "配置已更新"
+                                    },
+                                    lines,
+                                ))),
+                                Err(err) => {
+                                    input.error = Some(err.to_string());
+                                    LoopAction::None
+                                }
+                            }
+                        }
+                        Some(tui::InputAction::Back) => LoopAction::Pop,
+                        Some(tui::InputAction::Quit) => {
+                            if *initial_setup {
+                                LoopAction::Exit
+                            } else {
+                                LoopAction::ResetToMain
+                            }
+                        }
                         None => LoopAction::None,
                     }
                 }
@@ -292,7 +363,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -328,7 +399,7 @@ impl FullScreenApp {
                                 lines.clone(),
                             )))
                         }
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -354,7 +425,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -392,7 +463,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -417,7 +488,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -448,7 +519,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
-                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
                     }
                 }
@@ -456,7 +527,7 @@ impl FullScreenApp {
                     terminal.draw(|frame| result.render(frame))?;
                     match result.handle_key_event() {
                         Some(tui::ResultAction::Back) => LoopAction::ResetToMain,
-                        Some(tui::ResultAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        Some(tui::ResultAction::Quit) => LoopAction::Exit,
                         None => LoopAction::None,
                     }
                 }
@@ -468,11 +539,19 @@ impl FullScreenApp {
                 LoopAction::Pop => {
                     pages.pop();
                     if pages.is_empty() {
-                        return Ok(AppExit::Quit);
+                        return Ok(());
                     }
                 }
-                LoopAction::ResetToMain => pages.truncate(1),
-                LoopAction::Exit(exit) => return Ok(exit),
+                LoopAction::ResetToMain => {
+                    if matches!(pages.first(), Some(Page::MainMenu(_))) {
+                        pages.truncate(1);
+                    } else {
+                        pages.clear();
+                        pages.push(Page::MainMenu(self.main_menu_page()));
+                    }
+                    self.start_with_setup = false;
+                }
+                LoopAction::Exit => return Ok(()),
             }
         }
     }
@@ -497,6 +576,85 @@ impl FullScreenApp {
             vec!["删除已有 worktree，并可选删除本地/远程分支。".to_string()],
             vec!["重新设置项目根目录、worktree 根目录和 IDE。".to_string()],
             vec!["结束 gwtm。".to_string()],
+        ])
+    }
+
+    fn config_projects_root_page(&self, initial_setup: bool) -> Page {
+        let subtitle = if initial_setup {
+            "首次启动：先设置包含多个 Git 仓库的项目根目录"
+        } else {
+            "更新项目根目录"
+        };
+        Page::ConfigProjectsRoot {
+            initial_setup,
+            input: tui::InputState::new(
+                "gwtm / 配置项目目录",
+                subtitle,
+                "输入项目根目录路径",
+                &self.config.projects_root_dir.to_string_lossy(),
+            ),
+        }
+    }
+
+    fn config_worktrees_root_page(&self, projects_root: PathBuf, initial_setup: bool) -> Page {
+        let default_worktrees_root = self.default_worktrees_root_input(&projects_root);
+        let subtitle = if initial_setup {
+            "设置 Worktree 根目录，不存在会自动创建"
+        } else {
+            "更新 Worktree 根目录，不存在会自动创建"
+        };
+        Page::ConfigWorktreesRoot {
+            projects_root,
+            initial_setup,
+            input: tui::InputState::new(
+                "gwtm / 配置 Worktree 目录",
+                subtitle,
+                "输入 Worktree 根目录路径",
+                &default_worktrees_root.to_string_lossy(),
+            ),
+        }
+    }
+
+    fn default_worktrees_root_input(&self, projects_root: &Path) -> PathBuf {
+        let current_default = derive_default_worktrees_root(&self.config.projects_root_dir);
+        if self.config.worktrees_root_dir == current_default {
+            derive_default_worktrees_root(projects_root)
+        } else {
+            self.config.worktrees_root_dir.clone()
+        }
+    }
+
+    fn config_with_paths(&self, projects_root: PathBuf, worktrees_root: PathBuf) -> AppConfig {
+        AppConfig {
+            projects_root_dir: projects_root,
+            worktrees_root_dir: worktrees_root,
+            ide_mode: self.config.ide_mode.clone(),
+            ide_command: self.config.ide_command.clone(),
+            ide_label: self.config.ide_label.clone(),
+        }
+    }
+
+    fn apply_config_paths(
+        &mut self,
+        projects_root: PathBuf,
+        worktrees_root_input: &str,
+    ) -> Result<Vec<String>> {
+        let worktrees_root = validate_directory_input(worktrees_root_input, false)?;
+        fs::create_dir_all(&worktrees_root)
+            .with_context(|| format!("创建 worktree 根目录失败: {}", worktrees_root.display()))?;
+
+        let mut new_config = self.config_with_paths(projects_root.clone(), worktrees_root.clone());
+        normalize_config(&mut new_config)?;
+        save_config(&self.config_path, &new_config)?;
+        self.config = new_config.clone();
+        self.start_with_setup = false;
+
+        Ok(vec![
+            "[SUCCESS] 配置已保存".to_string(),
+            format!("项目根目录: {}", projects_root.display()),
+            format!("Worktree 根目录: {}", worktrees_root.display()),
+            format!("IDE: {}", new_config.ide_label),
+            format!("配置文件: {}", self.config_path.display()),
         ])
     }
 
@@ -978,25 +1136,13 @@ fn run() -> Result<()> {
     }
 
     ensure_git_available()?;
-    let theme = ColorfulTheme::default();
     let config_path = config_file_path()?;
-    let mut config = load_or_setup_config(&theme, &config_path)?;
+    let (config, needs_setup) = load_or_prepare_config(&config_path)?;
 
-    loop {
-        match FullScreenApp::new(config.clone()).run()? {
-            AppExit::Quit => return Ok(()),
-            AppExit::Reconfigure => {
-                let new_config = run_setup_wizard(
-                    &theme,
-                    Some(&config.projects_root_dir),
-                    Some(&config.worktrees_root_dir),
-                )?;
-                if let SetupWizardOutcome::Completed(new_config) = new_config {
-                    save_config(&config_path, &new_config)?;
-                    config = new_config;
-                }
-            }
-        }
+    if needs_setup {
+        FullScreenApp::new_for_setup(config, config_path).run()
+    } else {
+        FullScreenApp::new(config, config_path).run()
     }
 }
 
@@ -1038,14 +1184,6 @@ fn print_help() -> Result<()> {
     Ok(())
 }
 
-fn clear_screen() -> Result<()> {
-    let mut stdout = io::stdout();
-    stdout
-        .write_all(b"\x1b[2J\x1b[H")
-        .context("清空终端界面失败")?;
-    stdout.flush().context("刷新终端界面失败")
-}
-
 fn ensure_git_available() -> Result<()> {
     Command::new("git")
         .arg("--version")
@@ -1069,20 +1207,14 @@ fn config_file_path() -> Result<PathBuf> {
     Ok(home.join(".config").join(APP_NAME).join("config.toml"))
 }
 
-fn load_or_setup_config(theme: &ColorfulTheme, config_path: &Path) -> Result<AppConfig> {
+fn load_or_prepare_config(config_path: &Path) -> Result<(AppConfig, bool)> {
     if config_path.exists() {
         let mut config = load_config(config_path)?;
         normalize_config(&mut config)?;
-        return Ok(config);
+        return Ok((config, false));
     }
 
-    match run_setup_wizard(theme, None, None)? {
-        SetupWizardOutcome::Completed(config) => {
-            save_config(config_path, &config)?;
-            Ok(config)
-        }
-        SetupWizardOutcome::Cancelled => bail!("初始化已取消"),
-    }
+    Ok((initial_config_guess()?, true))
 }
 
 fn load_config(config_path: &Path) -> Result<AppConfig> {
@@ -1145,123 +1277,35 @@ fn derive_default_worktrees_root(projects_root: &Path) -> PathBuf {
         .join("worktrees")
 }
 
-fn choose_folder_with_dialog(prompt: &str) -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg("try")
-            .arg("-e")
-            .arg(format!(
-                "POSIX path of (choose folder with prompt \"{}\")",
-                prompt.replace('"', "\\\"")
-            ))
-            .arg("-e")
-            .arg("on error number -128")
-            .arg("-e")
-            .arg("return \"\"")
-            .arg("-e")
-            .arg("end try")
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            None
-        } else {
-            normalize_path(Path::new(&value)).ok()
-        }
-    } else {
-        None
-    }
+fn initial_config_guess() -> Result<AppConfig> {
+    let projects_root = normalize_path(&default_projects_root_guess())?;
+    let worktrees_root = derive_default_worktrees_root(&projects_root);
+    Ok(AppConfig::default_with_paths(projects_root, worktrees_root))
 }
 
-fn prompt_directory(
-    theme: &ColorfulTheme,
-    title: &str,
-    default: Option<&Path>,
-    must_exist: bool,
-) -> Result<PromptFlow> {
-    loop {
-        println!("[HINT] 回车确认，输入 b 返回上一步，输入 q 取消配置。");
-        let mut input = Input::<String>::with_theme(theme).with_prompt(title.to_string());
-        if let Some(default_value) = default {
-            input = input.default(default_value.to_string_lossy().to_string());
-        }
-        let value = input.interact_text().context("读取目录输入失败")?;
-        let trimmed = value.trim();
-        if matches!(trimmed, ":cancel" | "cancel" | "q") {
-            return Ok(PromptFlow::Cancel);
-        }
-        if matches!(trimmed, ":back" | "back" | "b") {
-            return Ok(PromptFlow::Back);
-        }
-        let normalized = normalize_path(Path::new(&value))?;
-
-        if must_exist && !normalized.is_dir() {
-            println!("[ERROR] 目录不存在: {}", normalized.display());
-            continue;
-        }
-        if normalized.exists() && !normalized.is_dir() {
-            println!("[ERROR] 路径不是目录: {}", normalized.display());
-            continue;
-        }
-        return Ok(PromptFlow::Submit(normalized));
-    }
+fn default_projects_root_guess() -> PathBuf {
+    env::current_dir()
+        .ok()
+        .filter(|path| path.is_dir())
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn run_setup_wizard(
-    theme: &ColorfulTheme,
-    existing_projects_root: Option<&Path>,
-    existing_worktrees_root: Option<&Path>,
-) -> Result<SetupWizardOutcome> {
-    clear_screen()?;
-    println!("== gwtm 初始化配置 ==");
-    println!("首次启动会先配置项目根目录和 worktree 根目录。");
-    println!("操作提示会在每一步输入前重复显示。");
-
-    let project_picker_default = existing_projects_root
-        .map(Path::to_path_buf)
-        .or_else(|| choose_folder_with_dialog("请选择包含多个 Git 仓库的项目根目录"));
-
-    let mut projects_root =
-        match prompt_directory(theme, "项目根目录", project_picker_default.as_deref(), true)? {
-            PromptFlow::Submit(path) => path,
-            PromptFlow::Back | PromptFlow::Cancel => return Ok(SetupWizardOutcome::Cancelled),
-        };
-
-    loop {
-        let worktrees_default = existing_worktrees_root
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| derive_default_worktrees_root(&projects_root));
-
-        match prompt_directory(
-            theme,
-            "Worktree 根目录（不存在会自动创建）",
-            Some(&worktrees_default),
-            false,
-        )? {
-            PromptFlow::Submit(worktrees_root) => {
-                fs::create_dir_all(&worktrees_root).with_context(|| {
-                    format!("创建 worktree 根目录失败: {}", worktrees_root.display())
-                })?;
-                return Ok(SetupWizardOutcome::Completed(
-                    AppConfig::default_with_paths(projects_root, worktrees_root),
-                ));
-            }
-            PromptFlow::Back => {
-                projects_root =
-                    match prompt_directory(theme, "项目根目录", Some(&projects_root), true)? {
-                        PromptFlow::Submit(path) => path,
-                        PromptFlow::Back | PromptFlow::Cancel => {
-                            return Ok(SetupWizardOutcome::Cancelled);
-                        }
-                    };
-            }
-            PromptFlow::Cancel => return Ok(SetupWizardOutcome::Cancelled),
-        }
+fn validate_directory_input(value: &str, must_exist: bool) -> Result<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("输入不能为空");
     }
+
+    let normalized = normalize_path(Path::new(trimmed))?;
+    if must_exist && !normalized.is_dir() {
+        bail!("目录不存在: {}", normalized.display());
+    }
+    if normalized.exists() && !normalized.is_dir() {
+        bail!("路径不是目录: {}", normalized.display());
+    }
+
+    Ok(normalized)
 }
 
 fn scan_projects(projects_root_dir: &Path) -> Result<Vec<Project>> {
