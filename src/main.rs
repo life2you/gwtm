@@ -272,6 +272,7 @@ impl FullScreenApp {
                                 ),
                             }
                         }
+                        Some(tui::InputAction::PickFolder) => LoopAction::None,
                         Some(tui::InputAction::Back) => LoopAction::Pop,
                         Some(tui::InputAction::Quit) => LoopAction::Exit,
                         None => LoopAction::None,
@@ -293,6 +294,15 @@ impl FullScreenApp {
                                     LoopAction::None
                                 }
                             }
+                        }
+                        Some(tui::InputAction::PickFolder) => {
+                            if let Some(path) = choose_folder_with_dialog("请选择项目根目录")
+                            {
+                                input.value = path.to_string_lossy().to_string();
+                                input.cursor_pos = input.value.len();
+                                input.error = None;
+                            }
+                            LoopAction::None
                         }
                         Some(tui::InputAction::Back) => {
                             if *initial_setup {
@@ -328,6 +338,15 @@ impl FullScreenApp {
                                     LoopAction::None
                                 }
                             }
+                        }
+                        Some(tui::InputAction::PickFolder) => {
+                            if let Some(path) = choose_folder_with_dialog("请选择 Worktree 根目录")
+                            {
+                                input.value = path.to_string_lossy().to_string();
+                                input.cursor_pos = input.value.len();
+                                input.error = None;
+                            }
+                            LoopAction::None
                         }
                         Some(tui::InputAction::Back) => LoopAction::Pop,
                         Some(tui::InputAction::Quit) => {
@@ -592,7 +611,8 @@ impl FullScreenApp {
                 subtitle,
                 "输入项目根目录路径",
                 &self.config.projects_root_dir.to_string_lossy(),
-            ),
+            )
+            .with_file_picker(),
         }
     }
 
@@ -611,7 +631,8 @@ impl FullScreenApp {
                 subtitle,
                 "输入 Worktree 根目录路径",
                 &default_worktrees_root.to_string_lossy(),
-            ),
+            )
+            .with_file_picker(),
         }
     }
 
@@ -1275,6 +1296,38 @@ fn derive_default_worktrees_root(projects_root: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("/"))
         .join("worktrees")
+}
+
+fn choose_folder_with_dialog(prompt: &str) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg("try")
+            .arg("-e")
+            .arg(format!(
+                "POSIX path of (choose folder with prompt \"{}\")",
+                prompt.replace('"', "\\\"")
+            ))
+            .arg("-e")
+            .arg("on error number -128")
+            .arg("-e")
+            .arg("return \"\"")
+            .arg("-e")
+            .arg("end try")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            normalize_path(Path::new(&value)).ok()
+        }
+    } else {
+        None
+    }
 }
 
 fn initial_config_guess() -> Result<AppConfig> {

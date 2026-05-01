@@ -373,10 +373,12 @@ pub struct InputState {
     pub value: String,
     pub error: Option<String>,
     pub cursor_pos: usize,
+    pub file_picker_enabled: bool,
 }
 
 pub enum InputAction {
     Submit(String),
+    PickFolder,
     Back,
     Quit,
 }
@@ -392,7 +394,13 @@ impl InputState {
             value,
             error: None,
             cursor_pos,
+            file_picker_enabled: false,
         }
+    }
+
+    pub fn with_file_picker(mut self) -> Self {
+        self.file_picker_enabled = true;
+        self
     }
 
     pub fn handle_key_event(&mut self) -> Option<InputAction> {
@@ -412,6 +420,9 @@ impl InputState {
                 KeyCode::Char('q') => return Some(InputAction::Quit),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(InputAction::Quit);
+                }
+                KeyCode::Char('f') if self.file_picker_enabled => {
+                    return Some(InputAction::PickFolder);
                 }
                 KeyCode::Char(c) => {
                     self.value.insert(self.cursor_pos, c);
@@ -526,16 +537,30 @@ impl InputState {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = Paragraph::new(Line::from(vec![
+        let picker_hint = if self.file_picker_enabled {
+            vec![
+                Span::styled("f", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 选文件夹  ", Style::default().fg(Color::DarkGray)),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        let mut spans = vec![
             Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" 确认  ", Style::default().fg(Color::DarkGray)),
+        ];
+        spans.extend(picker_hint);
+        spans.extend(vec![
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
             Span::styled("b", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
-        ]));
+        ]);
+
+        let footer = Paragraph::new(Line::from(spans));
         frame.render_widget(footer, area);
     }
 }
