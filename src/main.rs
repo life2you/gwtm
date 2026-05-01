@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const APP_NAME: &str = "gwtm";
-const DEFAULT_IDE_MODE: &str = "rust";
-const DEFAULT_IDE_COMMAND: &str = "rustrover";
-const DEFAULT_IDE_LABEL: &str = "RustRover";
+const DEFAULT_IDE_MODE: &str = "system";
+const DEFAULT_IDE_COMMAND: &str = "open";
+const DEFAULT_IDE_LABEL: &str = "System Default";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HOMEPAGE: &str = env!("CARGO_PKG_HOMEPAGE");
 
@@ -55,6 +55,14 @@ struct WorktreeEntry {
     bare: bool,
 }
 
+#[derive(Debug, Clone)]
+struct IdeOption {
+    mode: String,
+    command: String,
+    label: String,
+    detail: String,
+}
+
 #[derive(Clone, Copy)]
 enum ProjectIntent {
     Create,
@@ -81,6 +89,13 @@ enum Page {
         projects_root: PathBuf,
         input: tui::InputState,
         initial_setup: bool,
+    },
+    ConfigIdeSelect {
+        projects_root: PathBuf,
+        worktrees_root: PathBuf,
+        initial_setup: bool,
+        options: Vec<IdeOption>,
+        menu: tui::MenuState,
     },
     BaseBranchSelect {
         project_idx: usize,
@@ -323,16 +338,17 @@ impl FullScreenApp {
                     terminal.draw(|frame| input.render(frame))?;
                     match input.handle_key_event() {
                         Some(tui::InputAction::Submit(value)) => {
-                            match self.apply_config_paths(projects_root.clone(), &value) {
-                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
-                                    "gwtm / 配置结果",
-                                    if *initial_setup {
-                                        "初始化完成"
-                                    } else {
-                                        "配置已更新"
-                                    },
-                                    lines,
-                                ))),
+                            match validate_directory_input(&value, false) {
+                                Ok(worktrees_root) => match self.config_ide_page(
+                                    projects_root.clone(),
+                                    worktrees_root,
+                                    *initial_setup,
+                                ) {
+                                    Ok(page) => LoopAction::Push(page),
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("检测 IDE 失败", err),
+                                    ),
+                                },
                                 Err(err) => {
                                     input.error = Some(err.to_string());
                                     LoopAction::None
@@ -350,6 +366,46 @@ impl FullScreenApp {
                         }
                         Some(tui::InputAction::Back) => LoopAction::Pop,
                         Some(tui::InputAction::Quit) => {
+                            if *initial_setup {
+                                LoopAction::Exit
+                            } else {
+                                LoopAction::ResetToMain
+                            }
+                        }
+                        None => LoopAction::None,
+                    }
+                }
+                Page::ConfigIdeSelect {
+                    projects_root,
+                    worktrees_root,
+                    initial_setup,
+                    options,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            match self.apply_config(
+                                projects_root.clone(),
+                                worktrees_root.clone(),
+                                options[index].clone(),
+                            ) {
+                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    "gwtm / 配置结果",
+                                    if *initial_setup {
+                                        "初始化完成"
+                                    } else {
+                                        "配置已更新"
+                                    },
+                                    lines,
+                                ))),
+                                Err(err) => {
+                                    LoopAction::Push(self.error_result_page("保存配置失败", err))
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => {
                             if *initial_setup {
                                 LoopAction::Exit
                             } else {
@@ -636,6 +692,36 @@ impl FullScreenApp {
         }
     }
 
+    fn config_ide_page(
+        &self,
+        projects_root: PathBuf,
+        worktrees_root: PathBuf,
+        initial_setup: bool,
+    ) -> Result<Page> {
+        let options = detect_ide_options()?;
+        let items: Vec<String> = options.iter().map(|option| option.label.clone()).collect();
+        let details: Vec<Vec<String>> = options
+            .iter()
+            .map(|option| vec![option.detail.clone()])
+            .collect();
+        let default_index = preferred_ide_index(&options, &self.config);
+        let mut menu = tui::MenuState::new(
+            "gwtm / 选择 IDE",
+            "选择创建或打开 worktree 时默认使用的 IDE",
+            items,
+        )
+        .with_details(details);
+        menu.list_state.select(Some(default_index));
+
+        Ok(Page::ConfigIdeSelect {
+            projects_root,
+            worktrees_root,
+            initial_setup,
+            options,
+            menu,
+        })
+    }
+
     fn default_worktrees_root_input(&self, projects_root: &Path) -> PathBuf {
         let current_default = derive_default_worktrees_root(&self.config.projects_root_dir);
         if self.config.worktrees_root_dir == current_default {
@@ -655,16 +741,19 @@ impl FullScreenApp {
         }
     }
 
-    fn apply_config_paths(
+    fn apply_config(
         &mut self,
         projects_root: PathBuf,
-        worktrees_root_input: &str,
+        worktrees_root: PathBuf,
+        ide: IdeOption,
     ) -> Result<Vec<String>> {
-        let worktrees_root = validate_directory_input(worktrees_root_input, false)?;
         fs::create_dir_all(&worktrees_root)
             .with_context(|| format!("创建 worktree 根目录失败: {}", worktrees_root.display()))?;
 
         let mut new_config = self.config_with_paths(projects_root.clone(), worktrees_root.clone());
+        new_config.ide_mode = ide.mode;
+        new_config.ide_command = ide.command;
+        new_config.ide_label = ide.label;
         normalize_config(&mut new_config)?;
         save_config(&self.config_path, &new_config)?;
         self.config = new_config.clone();
@@ -1344,6 +1433,128 @@ fn default_projects_root_guess() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn detect_ide_options() -> Result<Vec<IdeOption>> {
+    let mut options = Vec::new();
+
+    for (label, command) in [
+        ("Visual Studio Code", "code"),
+        ("Cursor", "cursor"),
+        ("Windsurf", "windsurf"),
+        ("Zed", "zed"),
+        ("IntelliJ IDEA", "idea"),
+        ("GoLand", "goland"),
+        ("WebStorm", "webstorm"),
+        ("PyCharm", "pycharm"),
+        ("CLion", "clion"),
+        ("Rider", "rider"),
+        ("RustRover", "rustrover"),
+        ("Android Studio", "studio"),
+    ] {
+        if let Some(path) = command_in_path(command) {
+            options.push(IdeOption {
+                mode: "command".to_string(),
+                command: command.to_string(),
+                label: label.to_string(),
+                detail: format!("CLI 启动命令: {} ({})", command, path.display()),
+            });
+        }
+    }
+
+    for (label, app_name) in [
+        ("Visual Studio Code", "Visual Studio Code.app"),
+        ("Cursor", "Cursor.app"),
+        ("Windsurf", "Windsurf.app"),
+        ("Zed", "Zed.app"),
+        ("IntelliJ IDEA", "IntelliJ IDEA.app"),
+        ("IntelliJ IDEA Ultimate", "IntelliJ IDEA Ultimate.app"),
+        (
+            "IntelliJ IDEA Community Edition",
+            "IntelliJ IDEA Community Edition.app",
+        ),
+        ("GoLand", "GoLand.app"),
+        ("WebStorm", "WebStorm.app"),
+        ("PyCharm", "PyCharm.app"),
+        ("CLion", "CLion.app"),
+        ("Rider", "Rider.app"),
+        ("RustRover", "RustRover.app"),
+        ("Android Studio", "Android Studio.app"),
+    ] {
+        if let Some(path) = find_macos_app(app_name) {
+            if options
+                .iter()
+                .any(|option| option.label == label && option.mode == "app")
+            {
+                continue;
+            }
+            options.push(IdeOption {
+                mode: "app".to_string(),
+                command: label.to_string(),
+                label: label.to_string(),
+                detail: format!("macOS 应用: {}", path.display()),
+            });
+        }
+    }
+
+    options.push(IdeOption {
+        mode: "system".to_string(),
+        command: "open".to_string(),
+        label: DEFAULT_IDE_LABEL.to_string(),
+        detail: "使用 macOS 默认关联应用打开目录。".to_string(),
+    });
+
+    if options.is_empty() {
+        bail!("未检测到可用 IDE");
+    }
+
+    Ok(options)
+}
+
+fn command_in_path(command: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn find_macos_app(app_name: &str) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let mut bases = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        bases.push(home.join("Applications"));
+    }
+
+    for base in bases {
+        let candidate = base.join(app_name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn preferred_ide_index(options: &[IdeOption], config: &AppConfig) -> usize {
+    if let Some(index) = options.iter().position(|option| {
+        option.mode == config.ide_mode
+            && option.command == config.ide_command
+            && option.label == config.ide_label
+    }) {
+        return index;
+    }
+
+    options
+        .iter()
+        .position(|option| option.mode != "system")
+        .unwrap_or(0)
+}
+
 fn validate_directory_input(value: &str, must_exist: bool) -> Result<PathBuf> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1433,13 +1644,35 @@ fn branch_to_dirname(branch: &str) -> String {
 }
 
 fn open_with_ide(config: &AppConfig, project_path: &Path) -> Result<()> {
-    let mut child = Command::new(&config.ide_command)
-        .arg(project_path)
+    let mut command = match config.ide_mode.as_str() {
+        "app" => {
+            let mut cmd = Command::new("open");
+            cmd.arg("-a").arg(&config.ide_command).arg(project_path);
+            cmd
+        }
+        "system" => {
+            let mut cmd = Command::new("open");
+            cmd.arg(project_path);
+            cmd
+        }
+        _ => {
+            let mut cmd = Command::new(&config.ide_command);
+            cmd.arg(project_path);
+            cmd
+        }
+    };
+
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .with_context(|| format!("执行 IDE 命令失败: {}", config.ide_command))?;
+        .with_context(|| {
+            format!(
+                "执行 IDE 命令失败: {}。可进入“重新配置”重新选择可用 IDE。",
+                config.ide_label
+            )
+        })?;
 
     let _ = child.try_wait();
     Ok(())

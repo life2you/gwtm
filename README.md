@@ -10,7 +10,7 @@
 - Creates, opens, lists, and removes Git worktrees
 - Provides a fullscreen TUI for first-run setup and later reconfiguration
 - Supports searchable project, branch, and worktree pickers
-- Uses `RustRover` as the default IDE command after opening a worktree
+- Detects available IDE launchers and lets you choose which one should open worktrees
 
 ## Project Layout
 
@@ -86,8 +86,9 @@ On first launch, `gwtm` asks for:
 
 1. `projects_root_dir`: a folder whose direct children are Git repositories
 2. `worktrees_root_dir`: where created worktrees should be stored
+3. the IDE or launcher that should open worktrees
 
-The configuration flow runs in the same fullscreen TUI used by the main menu. On macOS, press `f` on a path field to open the system folder picker.
+The configuration flow runs in the same fullscreen TUI used by the main menu. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly.
 
 Config is saved to:
 
@@ -101,8 +102,8 @@ Example:
 projects_root_dir = "/Users/you/code"
 worktrees_root_dir = "/Users/you/worktrees"
 ide_mode = "rust"
-ide_command = "rustrover"
-ide_label = "RustRover"
+ide_command = "IntelliJ IDEA"
+ide_label = "IntelliJ IDEA"
 ```
 
 ## Main Menu
