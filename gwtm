@@ -7,6 +7,71 @@ DEBUG_BIN="$SCRIPT_DIR/target/debug/gwtm"
 SOURCE_ROOT="$SCRIPT_DIR/src"
 MANIFEST_PATH="$SCRIPT_DIR/Cargo.toml"
 LOCK_PATH="$SCRIPT_DIR/Cargo.lock"
+MODE="${GWTM_MODE:-auto}"
+PRINT_MODE=0
+ARGS=()
+
+show_launcher_help() {
+  cat <<'EOF'
+Usage: ./gwtm [launcher options] [-- binary args]
+
+Launcher options:
+  --mode auto|cargo|debug|release
+      Select how the launcher runs gwtm.
+  --print-mode
+      Print the resolved launcher mode and exit.
+  --launcher-help
+      Show this launcher help.
+
+Notes:
+  - `--help` is passed through to the gwtm binary.
+  - `--` stops launcher option parsing and forwards the remaining args.
+  - `USE_BUILT_BIN=1` still forces built binaries when `--mode` is not set.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --mode" >&2
+        exit 1
+      fi
+      MODE="$2"
+      shift 2
+      ;;
+    --mode=*)
+      MODE="${1#*=}"
+      shift
+      ;;
+    --print-mode)
+      PRINT_MODE=1
+      shift
+      ;;
+    --launcher-help)
+      show_launcher_help
+      exit 0
+      ;;
+    --)
+      shift
+      ARGS+=("$@")
+      break
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$MODE" in
+  auto|cargo|debug|release) ;;
+  *)
+    echo "Unsupported launcher mode: $MODE" >&2
+    echo "Use --launcher-help to see supported modes." >&2
+    exit 1
+    ;;
+esac
 
 has_newer_sources() {
   local bin_path="$1"
@@ -38,21 +103,73 @@ run_built_binary() {
   fi
 }
 
-if [[ "${USE_BUILT_BIN:-0}" == "1" ]]; then
-  if [[ -x "$RELEASE_BIN" ]]; then
-    exec "$RELEASE_BIN" "$@"
+resolve_mode() {
+  case "$MODE" in
+    cargo)
+      printf '%s\n' "cargo"
+      return 0
+      ;;
+    release)
+      printf '%s\n' "release"
+      return 0
+      ;;
+    debug)
+      printf '%s\n' "debug"
+      return 0
+      ;;
+  esac
+
+  if [[ "${USE_BUILT_BIN:-0}" == "1" ]]; then
+    if [[ -x "$RELEASE_BIN" ]]; then
+      printf '%s\n' "release"
+      return 0
+    fi
+    if [[ -x "$DEBUG_BIN" ]]; then
+      printf '%s\n' "debug"
+      return 0
+    fi
   fi
-  if [[ -x "$DEBUG_BIN" ]]; then
-    exec "$DEBUG_BIN" "$@"
+
+  if [[ -x "$RELEASE_BIN" ]] && ! has_newer_sources "$RELEASE_BIN"; then
+    printf '%s\n' "release"
+    return 0
   fi
+
+  if [[ -x "$DEBUG_BIN" ]] && ! has_newer_sources "$DEBUG_BIN"; then
+    printf '%s\n' "debug"
+    return 0
+  fi
+
+  printf '%s\n' "cargo"
+}
+
+RESOLVED_MODE="$(resolve_mode)"
+
+if [[ "$PRINT_MODE" == "1" ]]; then
+  printf '%s\n' "$RESOLVED_MODE"
+  exit 0
 fi
 
-run_built_binary "$RELEASE_BIN" "$@"
-run_built_binary "$DEBUG_BIN" "$@"
+case "$RESOLVED_MODE" in
+  release)
+    if [[ ! -x "$RELEASE_BIN" ]]; then
+      echo "release binary not found: $RELEASE_BIN" >&2
+      exit 1
+    fi
+    exec "$RELEASE_BIN" "${ARGS[@]}"
+    ;;
+  debug)
+    if [[ ! -x "$DEBUG_BIN" ]]; then
+      echo "debug binary not found: $DEBUG_BIN" >&2
+      exit 1
+    fi
+    exec "$DEBUG_BIN" "${ARGS[@]}"
+    ;;
+esac
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "cargo not found in PATH. Install the Rust toolchain or set USE_BUILT_BIN=1." >&2
   exit 1
 fi
 
-exec cargo run --quiet --manifest-path "$MANIFEST_PATH" -- "$@"
+exec cargo run --quiet --manifest-path "$MANIFEST_PATH" -- "${ARGS[@]}"
