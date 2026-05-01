@@ -88,7 +88,7 @@ On first launch, `gwtm` asks for:
 2. `worktrees_root_dir`: where created worktrees should be stored
 3. the IDE or launcher that should open worktrees
 
-The configuration flow runs in the same fullscreen TUI used by the main menu. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly.
+The configuration flow runs in the same fullscreen TUI used by the main menu. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly, or skip IDE setup and pick one the first time you open a worktree.
 
 Config is saved to:
 
@@ -101,7 +101,7 @@ Example:
 ```toml
 projects_root_dir = "/Users/you/code"
 worktrees_root_dir = "/Users/you/worktrees"
-ide_mode = "rust"
+ide_mode = "app"
 ide_command = "IntelliJ IDEA"
 ide_label = "IntelliJ IDEA"
 ```

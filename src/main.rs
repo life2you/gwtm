@@ -17,6 +17,8 @@ const APP_NAME: &str = "gwtm";
 const DEFAULT_IDE_MODE: &str = "system";
 const DEFAULT_IDE_COMMAND: &str = "open";
 const DEFAULT_IDE_LABEL: &str = "System Default";
+const PROMPT_IDE_MODE: &str = "prompt";
+const PROMPT_IDE_LABEL: &str = "稍后再设置";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HOMEPAGE: &str = env!("CARGO_PKG_HOMEPAGE");
 
@@ -106,6 +108,21 @@ enum Page {
     ConfirmOpenIde {
         worktree_path: PathBuf,
         lines: Vec<String>,
+        menu: tui::MenuState,
+    },
+    ChooseIdeForOpen {
+        result_title: String,
+        result_subtitle: String,
+        worktree_path: PathBuf,
+        lines: Vec<String>,
+        options: Vec<IdeOption>,
+        menu: tui::MenuState,
+    },
+    SaveDefaultIdeConfirm {
+        result_title: String,
+        result_subtitle: String,
+        lines: Vec<String>,
+        selected_ide: IdeOption,
         menu: tui::MenuState,
     },
     OpenWorktreeSelect {
@@ -450,28 +467,155 @@ impl FullScreenApp {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
                         Some(tui::MenuAction::Select(0)) => {
-                            let mut result_lines = lines.clone();
-                            match open_with_ide(&self.config, worktree_path) {
-                                Ok(()) => result_lines.push(format!(
-                                    "[SUCCESS] 已触发 {} 打开项目: {}",
-                                    self.config.ide_label,
-                                    worktree_path.display()
-                                )),
-                                Err(err) => {
-                                    result_lines.push(format!("[WARNING] 打开 IDE 失败: {err}"))
+                            if self.ide_is_configured() {
+                                let mut result_lines = lines.clone();
+                                match open_with_ide(&self.config, worktree_path) {
+                                    Ok(()) => result_lines.push(format!(
+                                        "[SUCCESS] 已触发 {} 打开项目: {}",
+                                        self.config.ide_label,
+                                        worktree_path.display()
+                                    )),
+                                    Err(err) => {
+                                        result_lines.push(format!("[WARNING] 打开 IDE 失败: {err}"))
+                                    }
+                                }
+                                LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    "gwtm / 创建结果",
+                                    "Worktree 已创建",
+                                    result_lines,
+                                )))
+                            } else {
+                                match self.ide_selection_page_for_open(
+                                    "gwtm / 选择 IDE",
+                                    "当前未设置默认 IDE，选择一个打开刚创建的 worktree",
+                                    "gwtm / 创建结果",
+                                    "Worktree 已创建",
+                                    worktree_path.clone(),
+                                    lines.clone(),
+                                ) {
+                                    Ok(page) => LoopAction::Push(page),
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("检测 IDE 失败", err),
+                                    ),
                                 }
                             }
-                            LoopAction::Push(Page::Result(tui::ResultState::new(
-                                "gwtm / 创建结果",
-                                "Worktree 已创建",
-                                result_lines,
-                            )))
                         }
                         Some(tui::MenuAction::Select(1)) | Some(tui::MenuAction::Back) => {
                             LoopAction::Push(Page::Result(tui::ResultState::new(
                                 "gwtm / 创建结果",
                                 "Worktree 已创建",
                                 lines.clone(),
+                            )))
+                        }
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::ChooseIdeForOpen {
+                    result_title,
+                    result_subtitle,
+                    worktree_path,
+                    lines,
+                    options,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            let selected = options[index].clone();
+                            if selected.mode == PROMPT_IDE_MODE {
+                                let mut result_lines = lines.clone();
+                                result_lines.push(
+                                    "[INFO] 本次未打开 IDE，可稍后在“重新配置”中设置默认 IDE。"
+                                        .to_string(),
+                                );
+                                LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    result_title,
+                                    result_subtitle,
+                                    result_lines,
+                                )))
+                            } else {
+                                let mut result_lines = lines.clone();
+                                match open_with_ide_option(&selected, worktree_path) {
+                                    Ok(()) => {
+                                        result_lines.push(format!(
+                                            "[SUCCESS] 已触发 {} 打开项目: {}",
+                                            selected.label,
+                                            worktree_path.display()
+                                        ));
+                                        LoopAction::Push(Page::SaveDefaultIdeConfirm {
+                                            result_title: result_title.clone(),
+                                            result_subtitle: result_subtitle.clone(),
+                                            lines: result_lines,
+                                            selected_ide: selected,
+                                            menu: tui::MenuState::new(
+                                                "gwtm / 保存默认 IDE",
+                                                format!(
+                                                    "是否将 {} 保存为默认 IDE？",
+                                                    options[index].label
+                                                )
+                                                .as_str(),
+                                                vec!["是".to_string(), "否".to_string()],
+                                            )
+                                            .with_details(vec![
+                                                vec![
+                                                    "后续创建或打开 worktree 时会默认使用这个 IDE。"
+                                                        .to_string(),
+                                                ],
+                                                vec!["仅本次使用，不修改配置文件。".to_string()],
+                                            ]),
+                                        })
+                                    }
+                                    Err(err) => {
+                                        result_lines
+                                            .push(format!("[WARNING] 打开 IDE 失败: {err}"));
+                                        LoopAction::Push(Page::Result(tui::ResultState::new(
+                                            result_title,
+                                            result_subtitle,
+                                            result_lines,
+                                        )))
+                                    }
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::SaveDefaultIdeConfirm {
+                    result_title,
+                    result_subtitle,
+                    lines,
+                    selected_ide,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(0)) => {
+                            let mut result_lines = lines.clone();
+                            match self.save_ide_preference(selected_ide.clone()) {
+                                Ok(()) => result_lines.push(format!(
+                                    "[SUCCESS] 已将 {} 保存为默认 IDE",
+                                    selected_ide.label
+                                )),
+                                Err(err) => {
+                                    result_lines.push(format!("[WARNING] 保存默认 IDE 失败: {err}"))
+                                }
+                            }
+                            LoopAction::Push(Page::Result(tui::ResultState::new(
+                                result_title,
+                                result_subtitle,
+                                result_lines,
+                            )))
+                        }
+                        Some(tui::MenuAction::Select(1)) | Some(tui::MenuAction::Back) => {
+                            let mut result_lines = lines.clone();
+                            result_lines.push("[INFO] 未修改默认 IDE 配置".to_string());
+                            LoopAction::Push(Page::Result(tui::ResultState::new(
+                                result_title,
+                                result_subtitle,
+                                result_lines,
                             )))
                         }
                         Some(tui::MenuAction::Quit) => LoopAction::Exit,
@@ -485,20 +629,14 @@ impl FullScreenApp {
                 } => {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
-                        Some(tui::MenuAction::Select(index)) => {
-                            match self
-                                .open_worktree_with_lines(*project_idx, worktrees[index].clone())
-                            {
-                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
-                                    "gwtm / 打开结果",
-                                    "Worktree 已打开",
-                                    lines,
-                                ))),
-                                Err(err) => LoopAction::Push(
-                                    self.error_result_page("打开 worktree 失败", err),
-                                ),
+                        Some(tui::MenuAction::Select(index)) => match self
+                            .open_worktree_action(*project_idx, worktrees[index].clone())
+                        {
+                            Ok(action) => action,
+                            Err(err) => {
+                                LoopAction::Push(self.error_result_page("打开 worktree 失败", err))
                             }
-                        }
+                        },
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
                         Some(tui::MenuAction::Quit) => LoopAction::Exit,
                         _ => LoopAction::None,
@@ -698,7 +836,8 @@ impl FullScreenApp {
         worktrees_root: PathBuf,
         initial_setup: bool,
     ) -> Result<Page> {
-        let options = detect_ide_options()?;
+        let mut options = detect_ide_options()?;
+        options.push(config_prompt_ide_option());
         let items: Vec<String> = options.iter().map(|option| option.label.clone()).collect();
         let details: Vec<Vec<String>> = options
             .iter()
@@ -763,9 +902,61 @@ impl FullScreenApp {
             "[SUCCESS] 配置已保存".to_string(),
             format!("项目根目录: {}", projects_root.display()),
             format!("Worktree 根目录: {}", worktrees_root.display()),
-            format!("IDE: {}", new_config.ide_label),
+            format!(
+                "IDE: {}",
+                if new_config.ide_mode == PROMPT_IDE_MODE {
+                    "未设置（首次打开时再选择）".to_string()
+                } else {
+                    new_config.ide_label.clone()
+                }
+            ),
             format!("配置文件: {}", self.config_path.display()),
         ])
+    }
+
+    fn save_ide_preference(&mut self, ide: IdeOption) -> Result<()> {
+        self.config.ide_mode = ide.mode;
+        self.config.ide_command = ide.command;
+        self.config.ide_label = ide.label;
+        normalize_config(&mut self.config)?;
+        save_config(&self.config_path, &self.config)
+    }
+
+    fn ide_is_configured(&self) -> bool {
+        self.config.ide_mode != PROMPT_IDE_MODE
+    }
+
+    fn ide_selection_page_for_open(
+        &self,
+        title: &str,
+        subtitle: &str,
+        result_title: &str,
+        result_subtitle: &str,
+        worktree_path: PathBuf,
+        lines: Vec<String>,
+    ) -> Result<Page> {
+        let mut options = detect_ide_options()?;
+        options.push(IdeOption {
+            mode: PROMPT_IDE_MODE.to_string(),
+            command: String::new(),
+            label: "本次先不打开".to_string(),
+            detail: "保持当前结果，不打开 IDE。".to_string(),
+        });
+
+        let items: Vec<String> = options.iter().map(|option| option.label.clone()).collect();
+        let details: Vec<Vec<String>> = options
+            .iter()
+            .map(|option| vec![option.detail.clone()])
+            .collect();
+
+        Ok(Page::ChooseIdeForOpen {
+            result_title: result_title.to_string(),
+            result_subtitle: result_subtitle.to_string(),
+            worktree_path,
+            lines,
+            options,
+            menu: tui::MenuState::new(title, subtitle, items).with_details(details),
+        })
     }
 
     fn project_select_page(&mut self, intent: ProjectIntent) -> Result<Page> {
@@ -1048,11 +1239,20 @@ impl FullScreenApp {
             lines,
             menu: tui::MenuState::new(
                 "gwtm / 打开 IDE",
-                format!("是否使用 {} 打开刚创建的 worktree？", self.config.ide_label).as_str(),
+                if self.ide_is_configured() {
+                    format!("是否使用 {} 打开刚创建的 worktree？", self.config.ide_label)
+                } else {
+                    "当前未设置默认 IDE，是否现在选择一个来打开？".to_string()
+                }
+                .as_str(),
                 vec!["是".to_string(), "否".to_string()],
             )
             .with_details(vec![
-                vec!["创建完成后立即调用 IDE 命令打开该目录。".to_string()],
+                vec![if self.ide_is_configured() {
+                    "创建完成后立即调用当前配置的 IDE 打开该目录。".to_string()
+                } else {
+                    "创建完成后会扫描本机可用 IDE，并让你临时选择一个打开。".to_string()
+                }],
                 vec!["只展示结果，不额外打开 IDE。".to_string()],
             ]),
         }
@@ -1131,6 +1331,48 @@ impl FullScreenApp {
         lines.push(format!("远程: origin/{new_branch}"));
 
         Ok((lines, worktree_path))
+    }
+
+    fn open_worktree_action(
+        &self,
+        project_idx: usize,
+        selected: WorktreeEntry,
+    ) -> Result<LoopAction> {
+        if self.ide_is_configured() {
+            let lines = self.open_worktree_with_lines(project_idx, selected)?;
+            return Ok(LoopAction::Push(Page::Result(tui::ResultState::new(
+                "gwtm / 打开结果",
+                "Worktree 已打开",
+                lines,
+            ))));
+        }
+
+        let project = &self.projects[project_idx];
+        let branch = selected
+            .branch
+            .clone()
+            .unwrap_or_else(|| "(detached)".to_string());
+        let kind = if selected.path == project.path {
+            "主仓库"
+        } else {
+            "Worktree"
+        };
+
+        let lines = vec![
+            format!("[INFO] 项目: {}", project.name),
+            format!("[INFO] 类型: {kind}"),
+            format!("[INFO] 分支: {branch}"),
+            format!("[INFO] 路径: {}", selected.path.display()),
+        ];
+
+        Ok(LoopAction::Push(self.ide_selection_page_for_open(
+            "gwtm / 选择 IDE",
+            "当前未设置默认 IDE，选择一个打开已有 worktree",
+            "gwtm / 打开结果",
+            "Worktree 已打开",
+            selected.path.clone(),
+            lines,
+        )?))
     }
 
     fn open_worktree_with_lines(
@@ -1348,13 +1590,33 @@ fn normalize_config(config: &mut AppConfig) -> Result<()> {
     config.projects_root_dir = normalize_path(&config.projects_root_dir)?;
     config.worktrees_root_dir = normalize_path(&config.worktrees_root_dir)?;
     if config.ide_mode.is_empty() {
-        config.ide_mode = DEFAULT_IDE_MODE.to_string();
+        config.ide_mode = PROMPT_IDE_MODE.to_string();
     }
-    if config.ide_command.is_empty() {
-        config.ide_command = DEFAULT_IDE_COMMAND.to_string();
-    }
-    if config.ide_label.is_empty() {
-        config.ide_label = DEFAULT_IDE_LABEL.to_string();
+
+    match config.ide_mode.as_str() {
+        PROMPT_IDE_MODE => {
+            config.ide_command.clear();
+            if config.ide_label.is_empty() {
+                config.ide_label = PROMPT_IDE_LABEL.to_string();
+            }
+        }
+        "system" => {
+            if config.ide_command.is_empty() {
+                config.ide_command = DEFAULT_IDE_COMMAND.to_string();
+            }
+            if config.ide_label.is_empty() {
+                config.ide_label = DEFAULT_IDE_LABEL.to_string();
+            }
+        }
+        _ => {
+            if config.ide_command.is_empty() {
+                config.ide_command = DEFAULT_IDE_COMMAND.to_string();
+                config.ide_mode = DEFAULT_IDE_MODE.to_string();
+            }
+            if config.ide_label.is_empty() {
+                config.ide_label = config.ide_command.clone();
+            }
+        }
     }
     Ok(())
 }
@@ -1502,10 +1764,6 @@ fn detect_ide_options() -> Result<Vec<IdeOption>> {
         detail: "使用 macOS 默认关联应用打开目录。".to_string(),
     });
 
-    if options.is_empty() {
-        bail!("未检测到可用 IDE");
-    }
-
     Ok(options)
 }
 
@@ -1551,8 +1809,61 @@ fn preferred_ide_index(options: &[IdeOption], config: &AppConfig) -> usize {
 
     options
         .iter()
-        .position(|option| option.mode != "system")
+        .position(|option| option.mode == PROMPT_IDE_MODE)
+        .or_else(|| options.iter().position(|option| option.mode != "system"))
         .unwrap_or(0)
+}
+
+fn config_prompt_ide_option() -> IdeOption {
+    IdeOption {
+        mode: PROMPT_IDE_MODE.to_string(),
+        command: String::new(),
+        label: PROMPT_IDE_LABEL.to_string(),
+        detail: "暂不设置默认 IDE，等首次创建或打开 worktree 时再选择。".to_string(),
+    }
+}
+
+fn open_with_ide_option(ide: &IdeOption, project_path: &Path) -> Result<()> {
+    let mut command = match ide.mode.as_str() {
+        "app" => {
+            let mut cmd = Command::new("open");
+            cmd.arg("-a").arg(&ide.command).arg(project_path);
+            cmd
+        }
+        "system" => {
+            let mut cmd = Command::new("open");
+            cmd.arg(project_path);
+            cmd
+        }
+        _ => {
+            let mut cmd = Command::new(&ide.command);
+            cmd.arg(project_path);
+            cmd
+        }
+    };
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("执行 IDE 命令失败: {}。", ide.label))?;
+
+    let _ = child.try_wait();
+    Ok(())
+}
+
+fn open_with_ide(config: &AppConfig, project_path: &Path) -> Result<()> {
+    open_with_ide_option(
+        &IdeOption {
+            mode: config.ide_mode.clone(),
+            command: config.ide_command.clone(),
+            label: config.ide_label.clone(),
+            detail: String::new(),
+        },
+        project_path,
+    )
+    .with_context(|| "可进入“重新配置”重新选择可用 IDE。")
 }
 
 fn validate_directory_input(value: &str, must_exist: bool) -> Result<PathBuf> {
@@ -1641,41 +1952,6 @@ fn default_base_branch_index(branches: &[String]) -> usize {
 
 fn branch_to_dirname(branch: &str) -> String {
     branch.replace('/', "-")
-}
-
-fn open_with_ide(config: &AppConfig, project_path: &Path) -> Result<()> {
-    let mut command = match config.ide_mode.as_str() {
-        "app" => {
-            let mut cmd = Command::new("open");
-            cmd.arg("-a").arg(&config.ide_command).arg(project_path);
-            cmd
-        }
-        "system" => {
-            let mut cmd = Command::new("open");
-            cmd.arg(project_path);
-            cmd
-        }
-        _ => {
-            let mut cmd = Command::new(&config.ide_command);
-            cmd.arg(project_path);
-            cmd
-        }
-    };
-
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "执行 IDE 命令失败: {}。可进入“重新配置”重新选择可用 IDE。",
-                config.ide_label
-            )
-        })?;
-
-    let _ = child.try_wait();
-    Ok(())
 }
 
 fn read_worktrees(project_path: &Path) -> Result<Vec<WorktreeEntry>> {
