@@ -61,6 +61,17 @@ enum AppExit {
     Reconfigure,
 }
 
+enum SetupWizardOutcome {
+    Completed(AppConfig),
+    Cancelled,
+}
+
+enum PromptFlow {
+    Submit(PathBuf),
+    Back,
+    Cancel,
+}
+
 #[derive(Clone, Copy)]
 enum ProjectIntent {
     Create,
@@ -980,8 +991,10 @@ fn run() -> Result<()> {
                     Some(&config.projects_root_dir),
                     Some(&config.worktrees_root_dir),
                 )?;
-                save_config(&config_path, &new_config)?;
-                config = new_config;
+                if let SetupWizardOutcome::Completed(new_config) = new_config {
+                    save_config(&config_path, &new_config)?;
+                    config = new_config;
+                }
             }
         }
     }
@@ -1063,9 +1076,13 @@ fn load_or_setup_config(theme: &ColorfulTheme, config_path: &Path) -> Result<App
         return Ok(config);
     }
 
-    let config = run_setup_wizard(theme, None, None)?;
-    save_config(config_path, &config)?;
-    Ok(config)
+    match run_setup_wizard(theme, None, None)? {
+        SetupWizardOutcome::Completed(config) => {
+            save_config(config_path, &config)?;
+            Ok(config)
+        }
+        SetupWizardOutcome::Cancelled => bail!("初始化已取消"),
+    }
 }
 
 fn load_config(config_path: &Path) -> Result<AppConfig> {
@@ -1165,13 +1182,20 @@ fn prompt_directory(
     title: &str,
     default: Option<&Path>,
     must_exist: bool,
-) -> Result<PathBuf> {
+) -> Result<PromptFlow> {
     loop {
         let mut input = Input::<String>::with_theme(theme).with_prompt(title.to_string());
         if let Some(default_value) = default {
             input = input.default(default_value.to_string_lossy().to_string());
         }
         let value = input.interact_text().context("读取目录输入失败")?;
+        let trimmed = value.trim();
+        if matches!(trimmed, ":cancel" | "cancel" | "q") {
+            return Ok(PromptFlow::Cancel);
+        }
+        if matches!(trimmed, ":back" | "back" | "b") {
+            return Ok(PromptFlow::Back);
+        }
         let normalized = normalize_path(Path::new(&value))?;
 
         if must_exist && !normalized.is_dir() {
@@ -1182,7 +1206,7 @@ fn prompt_directory(
             println!("[ERROR] 路径不是目录: {}", normalized.display());
             continue;
         }
-        return Ok(normalized);
+        return Ok(PromptFlow::Submit(normalized));
     }
 }
 
@@ -1190,33 +1214,53 @@ fn run_setup_wizard(
     theme: &ColorfulTheme,
     existing_projects_root: Option<&Path>,
     existing_worktrees_root: Option<&Path>,
-) -> Result<AppConfig> {
+) -> Result<SetupWizardOutcome> {
     clear_screen()?;
     println!("== gwtm 初始化配置 ==");
     println!("首次启动会先配置项目根目录和 worktree 根目录。");
+    println!("输入 `b` 返回上一步，输入 `q` 取消配置。");
 
     let project_picker_default = existing_projects_root
         .map(Path::to_path_buf)
         .or_else(|| choose_folder_with_dialog("请选择包含多个 Git 仓库的项目根目录"));
 
-    let projects_root =
-        prompt_directory(theme, "项目根目录", project_picker_default.as_deref(), true)?;
+    let mut projects_root =
+        match prompt_directory(theme, "项目根目录", project_picker_default.as_deref(), true)? {
+            PromptFlow::Submit(path) => path,
+            PromptFlow::Back | PromptFlow::Cancel => return Ok(SetupWizardOutcome::Cancelled),
+        };
 
-    let worktrees_default = existing_worktrees_root
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| derive_default_worktrees_root(&projects_root));
+    loop {
+        let worktrees_default = existing_worktrees_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| derive_default_worktrees_root(&projects_root));
 
-    let worktrees_root = prompt_directory(
-        theme,
-        "Worktree 根目录（不存在会自动创建）",
-        Some(&worktrees_default),
-        false,
-    )?;
-
-    fs::create_dir_all(&worktrees_root)
-        .with_context(|| format!("创建 worktree 根目录失败: {}", worktrees_root.display()))?;
-
-    Ok(AppConfig::default_with_paths(projects_root, worktrees_root))
+        match prompt_directory(
+            theme,
+            "Worktree 根目录（不存在会自动创建）",
+            Some(&worktrees_default),
+            false,
+        )? {
+            PromptFlow::Submit(worktrees_root) => {
+                fs::create_dir_all(&worktrees_root).with_context(|| {
+                    format!("创建 worktree 根目录失败: {}", worktrees_root.display())
+                })?;
+                return Ok(SetupWizardOutcome::Completed(
+                    AppConfig::default_with_paths(projects_root, worktrees_root),
+                ));
+            }
+            PromptFlow::Back => {
+                projects_root =
+                    match prompt_directory(theme, "项目根目录", Some(&projects_root), true)? {
+                        PromptFlow::Submit(path) => path,
+                        PromptFlow::Back | PromptFlow::Cancel => {
+                            return Ok(SetupWizardOutcome::Cancelled);
+                        }
+                    };
+            }
+            PromptFlow::Cancel => return Ok(SetupWizardOutcome::Cancelled),
+        }
+    }
 }
 
 fn scan_projects(projects_root_dir: &Path) -> Result<Vec<Project>> {
