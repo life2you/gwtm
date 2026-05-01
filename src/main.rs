@@ -509,7 +509,9 @@ impl FullScreenApp {
         };
         Ok(Page::ProjectSelect {
             intent,
-            menu: tui::MenuState::new("gwtm / 项目选择", subtitle, items).with_details(details),
+            menu: tui::MenuState::new("gwtm / 项目选择", subtitle, items)
+                .with_details(details)
+                .with_search("输入项目名或路径关键词"),
         })
     }
 
@@ -526,7 +528,8 @@ impl FullScreenApp {
             "选择新 worktree 的基准远程分支",
             base_branches.clone(),
         )
-        .with_details(details);
+        .with_details(details)
+        .with_search("输入分支关键词");
         menu.list_state.select(Some(default_index));
         Ok(Page::BaseBranchSelect {
             project_idx,
@@ -597,7 +600,8 @@ impl FullScreenApp {
                 "选择一个已有 worktree 或主仓库",
                 items,
             )
-            .with_details(details),
+            .with_details(details)
+            .with_search("输入分支名或路径关键词"),
         })
     }
 
@@ -678,7 +682,8 @@ impl FullScreenApp {
             project_idx,
             removable,
             menu: tui::MenuState::new("gwtm / 删除 Worktree", "选择一个要删除的 worktree", items)
-                .with_details(details),
+                .with_details(details)
+                .with_search("输入分支名或路径关键词"),
         })
     }
 
