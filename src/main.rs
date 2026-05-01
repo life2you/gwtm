@@ -1,5 +1,12 @@
+mod tui;
+
 use anyhow::{Context, Result, anyhow, bail};
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use crossterm::{
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use dialoguer::{Input, theme::ColorfulTheme};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -49,6 +56,746 @@ struct WorktreeEntry {
     bare: bool,
 }
 
+enum AppExit {
+    Quit,
+    Reconfigure,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectIntent {
+    Create,
+    List,
+    Remove,
+}
+
+enum Page {
+    MainMenu(tui::MenuState),
+    ProjectSelect {
+        intent: ProjectIntent,
+        menu: tui::MenuState,
+    },
+    BranchInput {
+        project_idx: usize,
+        input: tui::InputState,
+    },
+    BaseBranchSelect {
+        project_idx: usize,
+        new_branch: String,
+        base_branches: Vec<String>,
+        menu: tui::MenuState,
+    },
+    ConfirmOpenIde {
+        worktree_path: PathBuf,
+        lines: Vec<String>,
+        menu: tui::MenuState,
+    },
+    RemoveWorktreeSelect {
+        project_idx: usize,
+        removable: Vec<WorktreeEntry>,
+        menu: tui::MenuState,
+    },
+    RemoveLocalBranchConfirm {
+        project_idx: usize,
+        selected: WorktreeEntry,
+        menu: tui::MenuState,
+    },
+    RemoveRemoteBranchConfirm {
+        project_idx: usize,
+        selected: WorktreeEntry,
+        delete_local_branch: bool,
+        menu: tui::MenuState,
+    },
+    Result(tui::ResultState),
+}
+
+enum LoopAction {
+    None,
+    Push(Page),
+    Pop,
+    ResetToMain,
+    Exit(AppExit),
+}
+
+struct FullScreenApp {
+    config: AppConfig,
+    projects: Vec<Project>,
+}
+
+impl FullScreenApp {
+    fn new(config: AppConfig) -> Self {
+        Self {
+            config,
+            projects: Vec::new(),
+        }
+    }
+
+    fn run(&mut self) -> Result<AppExit> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let result = self.main_loop(&mut terminal);
+
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+
+        result
+    }
+
+    fn main_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<AppExit> {
+        let mut pages = vec![Page::MainMenu(self.main_menu_page())];
+
+        loop {
+            let Some(page) = pages.last_mut() else {
+                return Ok(AppExit::Quit);
+            };
+
+            let action = match page {
+                Page::MainMenu(menu) => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(0)) => {
+                            match self.project_select_page(ProjectIntent::Create) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => {
+                                    LoopAction::Push(self.error_result_page("项目扫描失败", err))
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Select(1)) => {
+                            match self.project_select_page(ProjectIntent::List) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => {
+                                    LoopAction::Push(self.error_result_page("项目扫描失败", err))
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Select(2)) => {
+                            match self.project_select_page(ProjectIntent::Remove) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => {
+                                    LoopAction::Push(self.error_result_page("项目扫描失败", err))
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Select(3)) => LoopAction::Exit(AppExit::Reconfigure),
+                        Some(tui::MenuAction::Select(4))
+                        | Some(tui::MenuAction::Back)
+                        | Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::ProjectSelect { intent, menu } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => match *intent {
+                            ProjectIntent::Create => LoopAction::Push(Page::BranchInput {
+                                project_idx: index,
+                                input: tui::InputState::new(
+                                    "gwtm / 新分支",
+                                    "输入要创建的 worktree 分支名",
+                                    format!("项目: {}", self.projects[index].name).as_str(),
+                                    "feat/my-feature",
+                                ),
+                            }),
+                            ProjectIntent::List => match self.worktree_list_page(index) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("读取 worktree 失败", err),
+                                ),
+                            },
+                            ProjectIntent::Remove => match self.remove_worktree_page(index) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("读取 worktree 失败", err),
+                                ),
+                            },
+                        },
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::BranchInput { project_idx, input } => {
+                    terminal.draw(|frame| input.render(frame))?;
+                    match input.handle_key_event() {
+                        Some(tui::InputAction::Submit(branch_name)) => {
+                            match self.base_branch_page(*project_idx, branch_name) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("读取远程分支失败", err),
+                                ),
+                            }
+                        }
+                        Some(tui::InputAction::Back) => LoopAction::Pop,
+                        Some(tui::InputAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        None => LoopAction::None,
+                    }
+                }
+                Page::BaseBranchSelect {
+                    project_idx,
+                    new_branch,
+                    base_branches,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            match self.create_worktree_with_lines(
+                                *project_idx,
+                                new_branch.clone(),
+                                base_branches[index].clone(),
+                            ) {
+                                Ok((lines, worktree_path)) => LoopAction::Push(
+                                    self.confirm_open_ide_page(worktree_path, lines),
+                                ),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("创建 worktree 失败", err),
+                                ),
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::ConfirmOpenIde {
+                    worktree_path,
+                    lines,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(0)) => {
+                            let mut result_lines = lines.clone();
+                            match open_with_ide(&self.config, worktree_path) {
+                                Ok(()) => result_lines.push(format!(
+                                    "[SUCCESS] 已触发 {} 打开项目: {}",
+                                    self.config.ide_label,
+                                    worktree_path.display()
+                                )),
+                                Err(err) => {
+                                    result_lines.push(format!("[WARNING] 打开 IDE 失败: {err}"))
+                                }
+                            }
+                            LoopAction::Push(Page::Result(tui::ResultState::new(
+                                "gwtm / 创建结果",
+                                "Worktree 已创建",
+                                result_lines,
+                            )))
+                        }
+                        Some(tui::MenuAction::Select(1)) | Some(tui::MenuAction::Back) => {
+                            LoopAction::Push(Page::Result(tui::ResultState::new(
+                                "gwtm / 创建结果",
+                                "Worktree 已创建",
+                                lines.clone(),
+                            )))
+                        }
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::RemoveWorktreeSelect {
+                    project_idx,
+                    removable,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            let selected = removable[index].clone();
+                            if selected.branch.is_some() {
+                                LoopAction::Push(
+                                    self.remove_local_branch_confirm_page(*project_idx, selected),
+                                )
+                            } else {
+                                match self.remove_worktree_with_lines(
+                                    *project_idx,
+                                    selected,
+                                    false,
+                                    false,
+                                ) {
+                                    Ok(lines) => {
+                                        LoopAction::Push(Page::Result(tui::ResultState::new(
+                                            "gwtm / 删除结果",
+                                            "Worktree 已删除",
+                                            lines,
+                                        )))
+                                    }
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("删除 worktree 失败", err),
+                                    ),
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::RemoveLocalBranchConfirm {
+                    project_idx,
+                    selected,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            let delete_local_branch = index == 0;
+                            match self.next_remove_step(
+                                *project_idx,
+                                selected.clone(),
+                                delete_local_branch,
+                            ) {
+                                Ok(next_page) => LoopAction::Push(next_page),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("删除 worktree 失败", err),
+                                ),
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::RemoveRemoteBranchConfirm {
+                    project_idx,
+                    selected,
+                    delete_local_branch,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            let delete_remote_branch = index == 0;
+                            match self.remove_worktree_with_lines(
+                                *project_idx,
+                                selected.clone(),
+                                *delete_local_branch,
+                                delete_remote_branch,
+                            ) {
+                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    "gwtm / 删除结果",
+                                    "删除流程已完成",
+                                    lines,
+                                ))),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("删除 worktree 失败", err),
+                                ),
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::Result(result) => {
+                    terminal.draw(|frame| result.render(frame))?;
+                    match result.handle_key_event() {
+                        Some(tui::ResultAction::Back) => LoopAction::ResetToMain,
+                        Some(tui::ResultAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        None => LoopAction::None,
+                    }
+                }
+            };
+
+            match action {
+                LoopAction::None => {}
+                LoopAction::Push(page) => pages.push(page),
+                LoopAction::Pop => {
+                    pages.pop();
+                    if pages.is_empty() {
+                        return Ok(AppExit::Quit);
+                    }
+                }
+                LoopAction::ResetToMain => pages.truncate(1),
+                LoopAction::Exit(exit) => return Ok(exit),
+            }
+        }
+    }
+
+    fn main_menu_page(&self) -> tui::MenuState {
+        tui::MenuState::new(
+            "gwtm",
+            "Git worktree manager",
+            vec![
+                "创建 Worktree".to_string(),
+                "列出 Worktree".to_string(),
+                "删除 Worktree".to_string(),
+                "重新配置".to_string(),
+                "退出程序".to_string(),
+            ],
+        )
+        .with_details(vec![
+            vec!["为某个仓库创建新的 worktree 与远程分支。".to_string()],
+            vec!["查看一个仓库当前已有的 worktree 列表。".to_string()],
+            vec!["删除已有 worktree，并可选删除本地/远程分支。".to_string()],
+            vec!["重新设置项目根目录、worktree 根目录和 IDE。".to_string()],
+            vec!["结束 gwtm。".to_string()],
+        ])
+    }
+
+    fn project_select_page(&mut self, intent: ProjectIntent) -> Result<Page> {
+        self.projects = scan_projects(&self.config.projects_root_dir)?;
+        let items: Vec<String> = self
+            .projects
+            .iter()
+            .map(|project| project.name.clone())
+            .collect();
+        let details: Vec<Vec<String>> = self
+            .projects
+            .iter()
+            .map(|project| vec![format!("路径: {}", project.path.display())])
+            .collect();
+        let subtitle = match intent {
+            ProjectIntent::Create => "选择一个仓库来创建 worktree",
+            ProjectIntent::List => "选择一个仓库查看 worktree 列表",
+            ProjectIntent::Remove => "选择一个仓库删除 worktree",
+        };
+        Ok(Page::ProjectSelect {
+            intent,
+            menu: tui::MenuState::new("gwtm / 项目选择", subtitle, items).with_details(details),
+        })
+    }
+
+    fn base_branch_page(&self, project_idx: usize, new_branch: String) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        let base_branches = remote_branches(&project.path)?;
+        let details: Vec<Vec<String>> = base_branches
+            .iter()
+            .map(|branch| vec![format!("将从 origin/{branch} 创建新分支 {new_branch}")])
+            .collect();
+        let default_index = default_base_branch_index(&base_branches);
+        let mut menu = tui::MenuState::new(
+            "gwtm / 基准分支",
+            "选择新 worktree 的基准远程分支",
+            base_branches.clone(),
+        )
+        .with_details(details);
+        menu.list_state.select(Some(default_index));
+        Ok(Page::BaseBranchSelect {
+            project_idx,
+            new_branch,
+            base_branches,
+            menu,
+        })
+    }
+
+    fn worktree_list_page(&self, project_idx: usize) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        let worktrees = read_worktrees(&project.path)?;
+        let mut lines = vec![format!("[INFO] 项目: {}", project.name)];
+        for (index, worktree) in worktrees.iter().enumerate() {
+            let branch = worktree
+                .branch
+                .clone()
+                .unwrap_or_else(|| "(detached)".to_string());
+            let marker = if worktree.path == project.path {
+                " (主仓库)"
+            } else {
+                ""
+            };
+            lines.push(format!("{}. {}{}", index + 1, branch, marker));
+            lines.push(format!("   路径: {}", worktree.path.display()));
+            lines.push(format!("   提交: {}", worktree.head));
+        }
+        lines.push(format!("[INFO] 共 {} 个 worktree", worktrees.len()));
+        Ok(Page::Result(tui::ResultState::new(
+            "gwtm / Worktree 列表",
+            project.name.as_str(),
+            lines,
+        )))
+    }
+
+    fn remove_worktree_page(&self, project_idx: usize) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        let removable: Vec<WorktreeEntry> = read_worktrees(&project.path)?
+            .into_iter()
+            .filter(|entry| entry.path != project.path && !entry.bare)
+            .collect();
+
+        if removable.is_empty() {
+            return Ok(Page::Result(tui::ResultState::new(
+                "gwtm / 删除结果",
+                project.name.as_str(),
+                vec![format!(
+                    "[INFO] 项目 {} 没有可删除的 worktree",
+                    project.name
+                )],
+            )));
+        }
+
+        let items: Vec<String> = removable
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}",
+                    entry
+                        .branch
+                        .clone()
+                        .unwrap_or_else(|| "(detached)".to_string())
+                )
+            })
+            .collect();
+        let details: Vec<Vec<String>> = removable
+            .iter()
+            .map(|entry| {
+                vec![
+                    format!(
+                        "分支: {}",
+                        entry
+                            .branch
+                            .clone()
+                            .unwrap_or_else(|| "(detached)".to_string())
+                    ),
+                    format!("路径: {}", entry.path.display()),
+                    format!("提交: {}", entry.head),
+                ]
+            })
+            .collect();
+
+        Ok(Page::RemoveWorktreeSelect {
+            project_idx,
+            removable,
+            menu: tui::MenuState::new("gwtm / 删除 Worktree", "选择一个要删除的 worktree", items)
+                .with_details(details),
+        })
+    }
+
+    fn remove_local_branch_confirm_page(
+        &self,
+        project_idx: usize,
+        selected: WorktreeEntry,
+    ) -> Page {
+        let branch_name = selected.branch.clone().unwrap_or_default();
+        Page::RemoveLocalBranchConfirm {
+            project_idx,
+            selected,
+            menu: tui::MenuState::new(
+                "gwtm / 删除分支",
+                "是否同时删除本地分支？",
+                vec!["是".to_string(), "否".to_string()],
+            )
+            .with_details(vec![
+                vec![
+                    format!("分支: {branch_name}"),
+                    "将删除 worktree 后继续删除本地分支。".to_string(),
+                ],
+                vec![
+                    format!("分支: {branch_name}"),
+                    "只删除 worktree，保留本地分支。".to_string(),
+                ],
+            ]),
+        }
+    }
+
+    fn next_remove_step(
+        &self,
+        project_idx: usize,
+        selected: WorktreeEntry,
+        delete_local_branch: bool,
+    ) -> Result<Page> {
+        let Some(branch_name) = selected.branch.clone() else {
+            let lines =
+                self.remove_worktree_with_lines(project_idx, selected, delete_local_branch, false)?;
+            return Ok(Page::Result(tui::ResultState::new(
+                "gwtm / 删除结果",
+                "删除流程已完成",
+                lines,
+            )));
+        };
+
+        let project = &self.projects[project_idx];
+        if remote_branch_exists(&project.path, &branch_name)? {
+            Ok(Page::RemoveRemoteBranchConfirm {
+                project_idx,
+                selected,
+                delete_local_branch,
+                menu: tui::MenuState::new(
+                    "gwtm / 删除远程分支",
+                    "是否同时删除远程分支？",
+                    vec!["是".to_string(), "否".to_string()],
+                )
+                .with_details(vec![
+                    vec![
+                        format!("远程分支: origin/{branch_name}"),
+                        "删除 worktree 后同时删除远程分支。".to_string(),
+                    ],
+                    vec![
+                        format!("远程分支: origin/{branch_name}"),
+                        "删除 worktree 后保留远程分支。".to_string(),
+                    ],
+                ]),
+            })
+        } else {
+            let lines =
+                self.remove_worktree_with_lines(project_idx, selected, delete_local_branch, false)?;
+            Ok(Page::Result(tui::ResultState::new(
+                "gwtm / 删除结果",
+                "删除流程已完成",
+                lines,
+            )))
+        }
+    }
+
+    fn confirm_open_ide_page(&self, worktree_path: PathBuf, lines: Vec<String>) -> Page {
+        Page::ConfirmOpenIde {
+            worktree_path,
+            lines,
+            menu: tui::MenuState::new(
+                "gwtm / 打开 IDE",
+                format!("是否使用 {} 打开刚创建的 worktree？", self.config.ide_label).as_str(),
+                vec!["是".to_string(), "否".to_string()],
+            )
+            .with_details(vec![
+                vec!["创建完成后立即调用 IDE 命令打开该目录。".to_string()],
+                vec!["只展示结果，不额外打开 IDE。".to_string()],
+            ]),
+        }
+    }
+
+    fn error_result_page(&self, title: &str, err: anyhow::Error) -> Page {
+        Page::Result(tui::ResultState::new(
+            "gwtm / 错误",
+            title,
+            vec![format!("[ERROR] {err:#}")],
+        ))
+    }
+
+    fn create_worktree_with_lines(
+        &self,
+        project_idx: usize,
+        new_branch: String,
+        base_branch: String,
+    ) -> Result<(Vec<String>, PathBuf)> {
+        let project = &self.projects[project_idx];
+        let dir_name = branch_to_dirname(&new_branch);
+        let worktree_path = self
+            .config
+            .worktrees_root_dir
+            .join(&project.name)
+            .join(&dir_name);
+
+        if worktree_path.exists() {
+            bail!("Worktree 目录已存在: {}", worktree_path.display());
+        }
+
+        let mut lines = vec![
+            format!("[INFO] 项目: {}", project.name),
+            format!("[INFO] 新分支: {new_branch}"),
+            format!("[INFO] 基准分支: origin/{base_branch}"),
+            format!("[INFO] Worktree 路径: {}", worktree_path.display()),
+            "[INFO] 正在 fetch 远程仓库...".to_string(),
+        ];
+
+        run_git(&project.path, &["fetch", "origin"])?;
+
+        fs::create_dir_all(
+            worktree_path
+                .parent()
+                .ok_or_else(|| anyhow!("Worktree 路径无效: {}", worktree_path.display()))?,
+        )
+        .with_context(|| format!("创建 Worktree 父目录失败: {}", worktree_path.display()))?;
+
+        lines.push("[INFO] 正在创建 worktree...".to_string());
+        run_git(
+            &project.path,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &new_branch,
+                &worktree_path.to_string_lossy(),
+                &format!("origin/{base_branch}"),
+            ],
+        )?;
+
+        lines.push("[INFO] 正在推送新分支到远程...".to_string());
+        if let Err(err) = run_git(&worktree_path, &["push", "-u", "origin", &new_branch]) {
+            lines.push(format!(
+                "[WARNING] 推送远程分支失败，Worktree 已创建但未成功建立远程分支: {err}"
+            ));
+        } else {
+            lines.push(format!(
+                "[SUCCESS] 远程分支已创建并建立跟踪: origin/{new_branch}"
+            ));
+        }
+
+        lines.push("[SUCCESS] Worktree 创建成功".to_string());
+        lines.push(format!("路径: {}", worktree_path.display()));
+        lines.push(format!("分支: {new_branch}"));
+        lines.push(format!("远程: origin/{new_branch}"));
+
+        Ok((lines, worktree_path))
+    }
+
+    fn remove_worktree_with_lines(
+        &self,
+        project_idx: usize,
+        selected: WorktreeEntry,
+        delete_local_branch: bool,
+        delete_remote_branch: bool,
+    ) -> Result<Vec<String>> {
+        let project = &self.projects[project_idx];
+        let branch_name = selected.branch.clone();
+
+        let mut lines = vec![
+            "[INFO] 即将删除 Worktree".to_string(),
+            format!("路径: {}", selected.path.display()),
+        ];
+        if let Some(ref branch) = branch_name {
+            lines.push(format!("分支: {branch}"));
+        }
+
+        if let Err(err) = run_git(
+            &project.path,
+            &["worktree", "remove", &selected.path.to_string_lossy()],
+        ) {
+            lines.push(format!("[WARNING] 普通删除失败，尝试强制删除: {err}"));
+            run_git(
+                &project.path,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &selected.path.to_string_lossy(),
+                ],
+            )?;
+        }
+        lines.push(format!(
+            "[SUCCESS] Worktree 已删除: {}",
+            selected.path.display()
+        ));
+
+        if delete_local_branch {
+            let branch = branch_name
+                .as_ref()
+                .ok_or_else(|| anyhow!("无法删除本地分支，当前 worktree 没有关联分支"))?;
+            if let Err(err) = run_git(&project.path, &["branch", "-d", branch]) {
+                lines.push(format!("[WARNING] git branch -d 失败，尝试强制删除: {err}"));
+                run_git(&project.path, &["branch", "-D", branch])?;
+            }
+            lines.push(format!("[SUCCESS] 本地分支已删除: {branch}"));
+        }
+
+        if delete_remote_branch {
+            let branch = branch_name
+                .as_ref()
+                .ok_or_else(|| anyhow!("无法删除远程分支，当前 worktree 没有关联分支"))?;
+            run_git(&project.path, &["push", "origin", "--delete", branch])?;
+            lines.push(format!("[SUCCESS] 远程分支已删除: origin/{branch}"));
+        }
+
+        Ok(lines)
+    }
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("[ERROR] {err:#}");
@@ -73,7 +820,21 @@ fn run() -> Result<()> {
     let theme = ColorfulTheme::default();
     let config_path = config_file_path()?;
     let mut config = load_or_setup_config(&theme, &config_path)?;
-    main_menu(&theme, &config_path, &mut config)
+
+    loop {
+        match FullScreenApp::new(config.clone()).run()? {
+            AppExit::Quit => return Ok(()),
+            AppExit::Reconfigure => {
+                let new_config = run_setup_wizard(
+                    &theme,
+                    Some(&config.projects_root_dir),
+                    Some(&config.worktrees_root_dir),
+                )?;
+                save_config(&config_path, &new_config)?;
+                config = new_config;
+            }
+        }
+    }
 }
 
 enum CliAction {
@@ -112,6 +873,14 @@ fn print_help() -> Result<()> {
     println!("HOMEPAGE:");
     println!("  {HOMEPAGE}");
     Ok(())
+}
+
+fn clear_screen() -> Result<()> {
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(b"\x1b[2J\x1b[H")
+        .context("清空终端界面失败")?;
+    stdout.flush().context("刷新终端界面失败")
 }
 
 fn ensure_git_available() -> Result<()> {
@@ -257,12 +1026,10 @@ fn prompt_directory(
 
         if must_exist && !normalized.is_dir() {
             println!("[ERROR] 目录不存在: {}", normalized.display());
-            pause();
             continue;
         }
         if normalized.exists() && !normalized.is_dir() {
             println!("[ERROR] 路径不是目录: {}", normalized.display());
-            pause();
             continue;
         }
         return Ok(normalized);
@@ -274,6 +1041,7 @@ fn run_setup_wizard(
     existing_projects_root: Option<&Path>,
     existing_worktrees_root: Option<&Path>,
 ) -> Result<AppConfig> {
+    clear_screen()?;
     println!("== gwtm 初始化配置 ==");
     println!("首次启动会先配置项目根目录和 worktree 根目录。");
 
@@ -299,57 +1067,6 @@ fn run_setup_wizard(
         .with_context(|| format!("创建 worktree 根目录失败: {}", worktrees_root.display()))?;
 
     Ok(AppConfig::default_with_paths(projects_root, worktrees_root))
-}
-
-fn main_menu(theme: &ColorfulTheme, config_path: &Path, config: &mut AppConfig) -> Result<()> {
-    loop {
-        println!();
-        println!("== gwtm ==");
-        println!("模式: {} ({})", config.ide_label, config.ide_command);
-        println!("项目根目录: {}", config.projects_root_dir.display());
-
-        let items = vec![
-            "创建 Worktree",
-            "列出 Worktree",
-            "删除 Worktree",
-            "重新配置",
-            "退出程序",
-        ];
-
-        let selection = Select::with_theme(theme)
-            .with_prompt("请选择操作")
-            .items(&items)
-            .default(0)
-            .interact()
-            .context("读取主菜单选择失败")?;
-
-        match selection {
-            0 => {
-                let projects = scan_projects(&config.projects_root_dir)?;
-                do_create_worktree(theme, config, &projects)?;
-            }
-            1 => {
-                let projects = scan_projects(&config.projects_root_dir)?;
-                do_list_worktrees(theme, &projects)?;
-            }
-            2 => {
-                let projects = scan_projects(&config.projects_root_dir)?;
-                do_remove_worktree(theme, &projects)?;
-            }
-            3 => {
-                let new_config = run_setup_wizard(
-                    theme,
-                    Some(&config.projects_root_dir),
-                    Some(&config.worktrees_root_dir),
-                )?;
-                save_config(config_path, &new_config)?;
-                *config = new_config;
-                println!("[INFO] 配置已更新: {}", config_path.display());
-            }
-            4 => return Ok(()),
-            _ => unreachable!(),
-        }
-    }
 }
 
 fn scan_projects(projects_root_dir: &Path) -> Result<Vec<Project>> {
@@ -385,111 +1102,6 @@ fn scan_projects(projects_root_dir: &Path) -> Result<Vec<Project>> {
     }
 
     Ok(projects)
-}
-
-fn select_project(theme: &ColorfulTheme, projects: &[Project], prompt: &str) -> Result<Project> {
-    let labels: Vec<String> = projects
-        .iter()
-        .map(|project| format!("{}  ({})", project.name, project.path.display()))
-        .collect();
-
-    let index = Select::with_theme(theme)
-        .with_prompt(prompt)
-        .items(&labels)
-        .default(0)
-        .interact()
-        .context("读取项目选择失败")?;
-
-    Ok(projects[index].clone())
-}
-
-fn do_create_worktree(
-    theme: &ColorfulTheme,
-    config: &AppConfig,
-    projects: &[Project],
-) -> Result<()> {
-    let project = select_project(theme, projects, "选择一个 Git 仓库")?;
-
-    let new_branch = Input::<String>::with_theme(theme)
-        .with_prompt(format!("请输入新分支名称（项目: {}）", project.name))
-        .default("feat/my-feature".to_string())
-        .interact_text()
-        .context("读取分支名称失败")?;
-
-    let base_options = remote_branches(&project.path)?;
-    let base_index = Select::with_theme(theme)
-        .with_prompt("选择基准分支")
-        .items(&base_options)
-        .default(default_base_branch_index(&base_options))
-        .interact()
-        .context("读取基准分支选择失败")?;
-    let base_branch = &base_options[base_index];
-
-    let dir_name = branch_to_dirname(&new_branch);
-    let wt_path = config
-        .worktrees_root_dir
-        .join(&project.name)
-        .join(&dir_name);
-
-    if wt_path.exists() {
-        bail!("Worktree 目录已存在: {}", wt_path.display());
-    }
-
-    println!("[INFO] 项目: {}", project.name);
-    println!("[INFO] 新分支: {}", new_branch);
-    println!("[INFO] 基准分支: origin/{base_branch}");
-    println!("[INFO] Worktree 路径: {}", wt_path.display());
-
-    println!("[INFO] 正在 fetch 远程仓库...");
-    run_git(&project.path, &["fetch", "origin"])?;
-
-    fs::create_dir_all(
-        wt_path
-            .parent()
-            .ok_or_else(|| anyhow!("Worktree 路径无效: {}", wt_path.display()))?,
-    )
-    .with_context(|| format!("创建 Worktree 父目录失败: {}", wt_path.display()))?;
-
-    println!("[INFO] 正在创建 worktree...");
-    run_git(
-        &project.path,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &new_branch,
-            &wt_path.to_string_lossy(),
-            &format!("origin/{base_branch}"),
-        ],
-    )?;
-
-    println!("[INFO] 正在推送新分支到远程...");
-    if let Err(err) = run_git(&wt_path, &["push", "-u", "origin", &new_branch]) {
-        println!("[WARNING] 推送远程分支失败，Worktree 已创建但未成功建立远程分支: {err}");
-    } else {
-        println!("[SUCCESS] 远程分支已创建并建立跟踪: origin/{new_branch}");
-    }
-
-    println!("[SUCCESS] Worktree 创建成功");
-    println!("路径: {}", wt_path.display());
-    println!("分支: {new_branch}");
-    println!("远程: origin/{new_branch}");
-    println!("cd {}", wt_path.display());
-
-    if Confirm::with_theme(theme)
-        .with_prompt(format!(
-            "是否使用 {} 打开刚创建的 Worktree 项目？",
-            config.ide_label
-        ))
-        .default(true)
-        .interact()
-        .context("读取打开项目确认失败")?
-    {
-        open_with_ide(config, &wt_path)?;
-    }
-
-    pause();
-    Ok(())
 }
 
 fn remote_branches(project_path: &Path) -> Result<Vec<String>> {
@@ -538,129 +1150,6 @@ fn open_with_ide(config: &AppConfig, project_path: &Path) -> Result<()> {
         .with_context(|| format!("执行 IDE 命令失败: {}", config.ide_command))?;
 
     let _ = child.try_wait();
-    println!(
-        "[SUCCESS] 已触发 {} 打开项目: {}",
-        config.ide_label,
-        project_path.display()
-    );
-    Ok(())
-}
-
-fn do_list_worktrees(theme: &ColorfulTheme, projects: &[Project]) -> Result<()> {
-    let project = select_project(theme, projects, "选择要查看的项目")?;
-    let worktrees = read_worktrees(&project.path)?;
-
-    println!("== Worktree 列表: {} ==", project.name);
-    for (index, worktree) in worktrees.iter().enumerate() {
-        let branch = worktree
-            .branch
-            .clone()
-            .unwrap_or_else(|| "(detached)".to_string());
-        let main_flag = if worktree.path == project.path {
-            " (主仓库)"
-        } else {
-            ""
-        };
-        println!("{}. {}{}", index + 1, branch, main_flag);
-        println!("   路径: {}", worktree.path.display());
-        println!("   提交: {}", worktree.head);
-    }
-    println!("共 {} 个 worktree", worktrees.len());
-
-    pause();
-    Ok(())
-}
-
-fn do_remove_worktree(theme: &ColorfulTheme, projects: &[Project]) -> Result<()> {
-    let project = select_project(theme, projects, "选择要操作的项目")?;
-    let worktrees = read_worktrees(&project.path)?;
-    let removable: Vec<WorktreeEntry> = worktrees
-        .into_iter()
-        .filter(|entry| entry.path != project.path && !entry.bare)
-        .collect();
-
-    if removable.is_empty() {
-        println!("[INFO] 项目 {} 没有可删除的 worktree", project.name);
-        pause();
-        return Ok(());
-    }
-
-    let labels: Vec<String> = removable
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}  ({})",
-                entry
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string()),
-                entry.path.display()
-            )
-        })
-        .collect();
-
-    let selection = Select::with_theme(theme)
-        .with_prompt("选择要删除的 worktree")
-        .items(&labels)
-        .default(0)
-        .interact()
-        .context("读取 worktree 删除选择失败")?;
-
-    let selected = removable[selection].clone();
-    let branch_name = selected.branch.clone().ok_or_else(|| {
-        anyhow!(
-            "无法删除 detached HEAD worktree，请手动处理: {}",
-            selected.path.display()
-        )
-    })?;
-
-    println!("[INFO] 即将删除 Worktree");
-    println!("分支: {}", branch_name);
-    println!("路径: {}", selected.path.display());
-
-    if let Err(err) = run_git(
-        &project.path,
-        &["worktree", "remove", &selected.path.to_string_lossy()],
-    ) {
-        println!("[WARNING] 普通删除失败，尝试强制删除: {err}");
-        run_git(
-            &project.path,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                &selected.path.to_string_lossy(),
-            ],
-        )?;
-    }
-    println!("[SUCCESS] Worktree 已删除: {}", selected.path.display());
-
-    if Confirm::with_theme(theme)
-        .with_prompt(format!("是否同时删除本地分支 {}？", branch_name))
-        .default(false)
-        .interact()
-        .context("读取删除分支确认失败")?
-    {
-        if let Err(err) = run_git(&project.path, &["branch", "-d", &branch_name]) {
-            println!("[WARNING] git branch -d 失败，尝试强制删除: {err}");
-            run_git(&project.path, &["branch", "-D", &branch_name])?;
-        }
-        println!("[SUCCESS] 本地分支已删除: {}", branch_name);
-
-        if remote_branch_exists(&project.path, &branch_name)? {
-            if Confirm::with_theme(theme)
-                .with_prompt(format!("是否同时删除远程分支 origin/{}？", branch_name))
-                .default(false)
-                .interact()
-                .context("读取删除远程分支确认失败")?
-            {
-                run_git(&project.path, &["push", "origin", "--delete", &branch_name])?;
-                println!("[SUCCESS] 远程分支已删除: origin/{}", branch_name);
-            }
-        }
-    }
-
-    pause();
     Ok(())
 }
 
@@ -728,11 +1217,11 @@ fn remote_branch_exists(project_path: &Path, branch: &str) -> Result<bool> {
 }
 
 fn run_git(project_path: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
+    let output = Command::new("git")
         .arg("-C")
         .arg(project_path)
         .args(args)
-        .status()
+        .output()
         .with_context(|| {
             format!(
                 "执行 git 命令失败: git -C {} {}",
@@ -741,11 +1230,19 @@ fn run_git(project_path: &Path, args: &[&str]) -> Result<()> {
             )
         })?;
 
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
         bail!(
-            "git 命令执行失败: git -C {} {}",
+            "git 命令执行失败: git -C {} {}\n{}",
             project_path.display(),
-            args.join(" ")
+            args.join(" "),
+            detail
         );
     }
 
@@ -777,13 +1274,6 @@ fn run_git_capture(project_path: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn pause() {
-    print!("按回车继续...");
-    let _ = io::stdout().flush();
-    let mut line = String::new();
-    let _ = io::stdin().read_line(&mut line);
 }
 
 #[cfg(test)]
