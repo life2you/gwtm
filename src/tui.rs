@@ -150,11 +150,14 @@ impl MenuState {
                     }
                     KeyCode::Esc => {
                         if self.search_query.is_empty() {
-                            self.search_mode = false;
+                            return Some(MenuAction::Back);
                         } else {
                             self.search_query.clear();
                             self.refresh_filter();
                         }
+                    }
+                    KeyCode::Char('b') if self.search_query.is_empty() => {
+                        return Some(MenuAction::Back);
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Some(MenuAction::Quit);
@@ -338,7 +341,7 @@ impl MenuState {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let search_label = if self.search_mode {
+        let search_label = if self.search_mode && !self.search_query.is_empty() {
             " Esc 清空  "
         } else if self.search_enabled {
             " / 搜索  "
@@ -353,6 +356,8 @@ impl MenuState {
             Span::styled(" 确认  ", Style::default().fg(Color::DarkGray)),
             Span::styled(search_label, Style::default().fg(Color::DarkGray)),
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("b", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
@@ -403,7 +408,7 @@ impl InputState {
                         return Some(InputAction::Submit(self.value.trim().to_string()));
                     }
                 }
-                KeyCode::Esc => return Some(InputAction::Back),
+                KeyCode::Esc | KeyCode::Char('b') => return Some(InputAction::Back),
                 KeyCode::Char('q') => return Some(InputAction::Quit),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(InputAction::Quit);
@@ -525,6 +530,8 @@ impl InputState {
             Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" 确认  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("b", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
