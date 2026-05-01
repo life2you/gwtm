@@ -64,6 +64,7 @@ enum AppExit {
 #[derive(Clone, Copy)]
 enum ProjectIntent {
     Create,
+    Open,
     List,
     Remove,
 }
@@ -87,6 +88,11 @@ enum Page {
     ConfirmOpenIde {
         worktree_path: PathBuf,
         lines: Vec<String>,
+        menu: tui::MenuState,
+    },
+    OpenWorktreeSelect {
+        project_idx: usize,
+        worktrees: Vec<WorktreeEntry>,
         menu: tui::MenuState,
     },
     RemoveWorktreeSelect {
@@ -169,7 +175,7 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Select(1)) => {
-                            match self.project_select_page(ProjectIntent::List) {
+                            match self.project_select_page(ProjectIntent::Open) {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
                                     LoopAction::Push(self.error_result_page("项目扫描失败", err))
@@ -177,6 +183,14 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Select(2)) => {
+                            match self.project_select_page(ProjectIntent::List) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => {
+                                    LoopAction::Push(self.error_result_page("项目扫描失败", err))
+                                }
+                            }
+                        }
+                        Some(tui::MenuAction::Select(3)) => {
                             match self.project_select_page(ProjectIntent::Remove) {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
@@ -184,8 +198,8 @@ impl FullScreenApp {
                                 }
                             }
                         }
-                        Some(tui::MenuAction::Select(3)) => LoopAction::Exit(AppExit::Reconfigure),
-                        Some(tui::MenuAction::Select(4))
+                        Some(tui::MenuAction::Select(4)) => LoopAction::Exit(AppExit::Reconfigure),
+                        Some(tui::MenuAction::Select(5))
                         | Some(tui::MenuAction::Back)
                         | Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
                         _ => LoopAction::None,
@@ -204,6 +218,12 @@ impl FullScreenApp {
                                     "feat/my-feature",
                                 ),
                             }),
+                            ProjectIntent::Open => match self.open_worktree_page(index) {
+                                Ok(page) => LoopAction::Push(page),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("读取 worktree 失败", err),
+                                ),
+                            },
                             ProjectIntent::List => match self.worktree_list_page(index) {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => LoopAction::Push(
@@ -297,6 +317,32 @@ impl FullScreenApp {
                                 lines.clone(),
                             )))
                         }
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::OpenWorktreeSelect {
+                    project_idx,
+                    worktrees,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            match self
+                                .open_worktree_with_lines(*project_idx, worktrees[index].clone())
+                            {
+                                Ok(lines) => LoopAction::Push(Page::Result(tui::ResultState::new(
+                                    "gwtm / 打开结果",
+                                    "Worktree 已打开",
+                                    lines,
+                                ))),
+                                Err(err) => LoopAction::Push(
+                                    self.error_result_page("打开 worktree 失败", err),
+                                ),
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
                         Some(tui::MenuAction::Quit) => LoopAction::Exit(AppExit::Quit),
                         _ => LoopAction::None,
                     }
@@ -426,6 +472,7 @@ impl FullScreenApp {
             "Git worktree manager",
             vec![
                 "创建 Worktree".to_string(),
+                "打开 Worktree".to_string(),
                 "列出 Worktree".to_string(),
                 "删除 Worktree".to_string(),
                 "重新配置".to_string(),
@@ -434,6 +481,7 @@ impl FullScreenApp {
         )
         .with_details(vec![
             vec!["为某个仓库创建新的 worktree 与远程分支。".to_string()],
+            vec!["打开已有 worktree 或主仓库到配置的 IDE。".to_string()],
             vec!["查看一个仓库当前已有的 worktree 列表。".to_string()],
             vec!["删除已有 worktree，并可选删除本地/远程分支。".to_string()],
             vec!["重新设置项目根目录、worktree 根目录和 IDE。".to_string()],
@@ -455,6 +503,7 @@ impl FullScreenApp {
             .collect();
         let subtitle = match intent {
             ProjectIntent::Create => "选择一个仓库来创建 worktree",
+            ProjectIntent::Open => "选择一个仓库来打开已有 worktree",
             ProjectIntent::List => "选择一个仓库查看 worktree 列表",
             ProjectIntent::Remove => "选择一个仓库删除 worktree",
         };
@@ -484,6 +533,71 @@ impl FullScreenApp {
             new_branch,
             base_branches,
             menu,
+        })
+    }
+
+    fn open_worktree_page(&self, project_idx: usize) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        let worktrees: Vec<WorktreeEntry> = read_worktrees(&project.path)?
+            .into_iter()
+            .filter(|entry| !entry.bare)
+            .collect();
+
+        if worktrees.is_empty() {
+            return Ok(Page::Result(tui::ResultState::new(
+                "gwtm / 打开结果",
+                project.name.as_str(),
+                vec![format!(
+                    "[INFO] 项目 {} 没有可打开的 worktree",
+                    project.name
+                )],
+            )));
+        }
+
+        let items: Vec<String> = worktrees
+            .iter()
+            .map(|entry| {
+                let branch = entry
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string());
+                if entry.path == project.path {
+                    format!("{branch} (主仓库)")
+                } else {
+                    branch
+                }
+            })
+            .collect();
+        let details: Vec<Vec<String>> = worktrees
+            .iter()
+            .map(|entry| {
+                let branch = entry
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string());
+                let location = if entry.path == project.path {
+                    "主仓库"
+                } else {
+                    "Worktree"
+                };
+                vec![
+                    format!("类型: {location}"),
+                    format!("分支: {branch}"),
+                    format!("路径: {}", entry.path.display()),
+                    format!("提交: {}", entry.head),
+                ]
+            })
+            .collect();
+
+        Ok(Page::OpenWorktreeSelect {
+            project_idx,
+            worktrees,
+            menu: tui::MenuState::new(
+                "gwtm / 打开 Worktree",
+                "选择一个已有 worktree 或主仓库",
+                items,
+            )
+            .with_details(details),
         })
     }
 
@@ -733,6 +847,37 @@ impl FullScreenApp {
         lines.push(format!("远程: origin/{new_branch}"));
 
         Ok((lines, worktree_path))
+    }
+
+    fn open_worktree_with_lines(
+        &self,
+        project_idx: usize,
+        selected: WorktreeEntry,
+    ) -> Result<Vec<String>> {
+        let project = &self.projects[project_idx];
+        let branch = selected
+            .branch
+            .clone()
+            .unwrap_or_else(|| "(detached)".to_string());
+        let kind = if selected.path == project.path {
+            "主仓库"
+        } else {
+            "Worktree"
+        };
+
+        open_with_ide(&self.config, &selected.path)?;
+
+        Ok(vec![
+            format!("[INFO] 项目: {}", project.name),
+            format!("[INFO] 类型: {kind}"),
+            format!("[INFO] 分支: {branch}"),
+            format!("[INFO] 路径: {}", selected.path.display()),
+            format!(
+                "[SUCCESS] 已触发 {} 打开项目: {}",
+                self.config.ide_label,
+                selected.path.display()
+            ),
+        ])
     }
 
     fn remove_worktree_with_lines(
