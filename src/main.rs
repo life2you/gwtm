@@ -1184,6 +1184,7 @@ fn prompt_directory(
     must_exist: bool,
 ) -> Result<PromptFlow> {
     loop {
+        println!("[HINT] 回车确认，输入 b 返回上一步，输入 q 取消配置。");
         let mut input = Input::<String>::with_theme(theme).with_prompt(title.to_string());
         if let Some(default_value) = default {
             input = input.default(default_value.to_string_lossy().to_string());
@@ -1218,7 +1219,7 @@ fn run_setup_wizard(
     clear_screen()?;
     println!("== gwtm 初始化配置 ==");
     println!("首次启动会先配置项目根目录和 worktree 根目录。");
-    println!("输入 `b` 返回上一步，输入 `q` 取消配置。");
+    println!("操作提示会在每一步输入前重复显示。");
 
     let project_picker_default = existing_projects_root
         .map(Path::to_path_buf)

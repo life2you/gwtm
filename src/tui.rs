@@ -633,6 +633,10 @@ impl ResultState {
             Span::styled(" 滚动  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("b", Style::default().fg(Color::DarkGray)),
+            Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
         ]));
