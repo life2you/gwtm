@@ -1,8 +1,8 @@
 class Gwtm < Formula
   desc "Git worktree manager for local multi-project workflows"
   homepage "https://github.com/life2you/gwtm"
-  url "https://github.com/life2you/gwtm/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "5406fb3819c2dac954453e5f69fd3daddc8dc126b5c78c93c44fd53447adada4"
+  url "https://github.com/life2you/gwtm/archive/refs/tags/v0.1.2.tar.gz"
+  sha256 "b2a0378f14d249defbecc8967f81af9ac3ecf1c906146c8b44458547bf1fd193"
   license "MIT"
 
   depends_on "rust" => :build
