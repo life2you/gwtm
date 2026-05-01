@@ -1,6 +1,6 @@
 [package]
 name = "gwtm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Git Worktree Manager for Rust-oriented workflows"
 license = "MIT"
