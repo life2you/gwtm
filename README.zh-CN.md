@@ -6,7 +6,7 @@
 
 ## 功能说明
 
-- 扫描配置好的项目根目录，并识别其一级子目录中的 Git 仓库
+- 扫描一个或多个项目根目录，并识别它们一级子目录中的 Git 仓库
 - 创建、打开、列出和删除 Git worktree
 - 提供全屏 TUI，用于首次初始化和后续重新配置
 - 支持项目、分支、worktree 的可搜索选择列表
@@ -84,11 +84,11 @@ brew install life2you/tap/gwtm
 
 首次启动时，`gwtm` 会要求配置：
 
-1. `projects_root_dir`：项目根目录，其一级子目录应为 Git 仓库
+1. `projects_root_dirs`：一个或多个项目根目录，其一级子目录应为 Git 仓库
 2. `worktrees_root_dir`：新建 worktree 的存放目录
 3. 默认用于打开 worktree 的 IDE 或启动器
 
-配置流程和主菜单使用同一套全屏 TUI。在 macOS 下，光标位于路径输入框时可按 `f` 打开系统文件夹选择器。路径确认后，`gwtm` 会自动检测本机可用的 IDE 启动命令和已安装应用，并让你明确选择一个默认打开方式；你也可以先跳过，等第一次打开 worktree 时再选。
+配置流程和主菜单使用同一套全屏 TUI。项目根目录现在通过专门的列表页来新增、编辑和删除，不需要手工拼成一行。macOS 下，光标位于路径输入框时可按 `f` 打开系统文件夹选择器。路径确认后，`gwtm` 会自动检测本机可用的 IDE 启动命令和已安装应用，并让你明确选择一个默认打开方式；你也可以先跳过，等第一次打开 worktree 时再选。
 
 配置文件会保存到：
 
@@ -99,7 +99,7 @@ brew install life2you/tap/gwtm
 示例：
 
 ```toml
-projects_root_dir = "/Users/you/code"
+projects_root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 worktrees_root_dir = "/Users/you/worktrees"
 ide_mode = "app"
 ide_command = "IntelliJ IDEA"
@@ -117,6 +117,7 @@ ide_label = "IntelliJ IDEA"
 
 ## 说明
 
+- 如果多个项目根目录下存在同名仓库，`gwtm` 会在项目选择页显示来源目录，帮助你选对仓库。
 - Worktree 默认创建在：
 
 ```text

@@ -24,7 +24,7 @@ const HOMEPAGE: &str = env!("CARGO_PKG_HOMEPAGE");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
-    projects_root_dir: PathBuf,
+    projects_root_dirs: Vec<PathBuf>,
     worktrees_root_dir: PathBuf,
     ide_mode: String,
     ide_command: String,
@@ -34,19 +34,28 @@ struct AppConfig {
 impl AppConfig {
     fn default_with_paths(projects_root_dir: PathBuf, worktrees_root_dir: PathBuf) -> Self {
         Self {
-            projects_root_dir,
+            projects_root_dirs: vec![projects_root_dir],
             worktrees_root_dir,
             ide_mode: DEFAULT_IDE_MODE.to_string(),
             ide_command: DEFAULT_IDE_COMMAND.to_string(),
             ide_label: DEFAULT_IDE_LABEL.to_string(),
         }
     }
+
+    fn primary_projects_root(&self) -> &Path {
+        self.projects_root_dirs
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or_else(|| Path::new("."))
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Project {
     name: String,
+    display_name: String,
     path: PathBuf,
+    source_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -83,17 +92,30 @@ enum Page {
         project_idx: usize,
         input: tui::InputState,
     },
-    ConfigProjectsRoot {
-        input: tui::InputState,
+    ConfigProjectsRoots {
+        roots: Vec<PathBuf>,
         initial_setup: bool,
+        menu: tui::MenuState,
+    },
+    ConfigProjectRootActions {
+        roots: Vec<PathBuf>,
+        root_idx: usize,
+        initial_setup: bool,
+        menu: tui::MenuState,
+    },
+    ConfigProjectRootInput {
+        roots: Vec<PathBuf>,
+        edit_idx: Option<usize>,
+        initial_setup: bool,
+        input: tui::InputState,
     },
     ConfigWorktreesRoot {
-        projects_root: PathBuf,
+        project_roots: Vec<PathBuf>,
         input: tui::InputState,
         initial_setup: bool,
     },
     ConfigIdeSelect {
-        projects_root: PathBuf,
+        project_roots: Vec<PathBuf>,
         worktrees_root: PathBuf,
         initial_setup: bool,
         options: Vec<IdeOption>,
@@ -153,6 +175,10 @@ enum LoopAction {
     None,
     Push(Page),
     Pop,
+    ReplaceConfigRoots {
+        roots: Vec<PathBuf>,
+        initial_setup: bool,
+    },
     ResetToMain,
     Exit,
 }
@@ -310,17 +336,94 @@ impl FullScreenApp {
                         None => LoopAction::None,
                     }
                 }
-                Page::ConfigProjectsRoot {
-                    input,
+                Page::ConfigProjectsRoots {
+                    roots,
                     initial_setup,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(index)) => {
+                            let root_count = roots.len();
+                            if index < root_count {
+                                LoopAction::Push(self.config_project_root_actions_page(
+                                    roots.clone(),
+                                    index,
+                                    *initial_setup,
+                                ))
+                            } else if index == root_count {
+                                LoopAction::Push(self.config_project_root_input_page(
+                                    roots.clone(),
+                                    None,
+                                    *initial_setup,
+                                ))
+                            } else {
+                                LoopAction::Push(
+                                    self.config_worktrees_root_page(roots.clone(), *initial_setup),
+                                )
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => {
+                            if *initial_setup {
+                                LoopAction::Exit
+                            } else {
+                                LoopAction::Pop
+                            }
+                        }
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::ConfigProjectRootActions {
+                    roots,
+                    root_idx,
+                    initial_setup,
+                    menu,
+                } => {
+                    terminal.draw(|frame| menu.render(frame))?;
+                    match menu.handle_key_event() {
+                        Some(tui::MenuAction::Select(0)) => LoopAction::Push(
+                            self.config_project_root_input_page(
+                                roots.clone(),
+                                Some(*root_idx),
+                                *initial_setup,
+                            ),
+                        ),
+                        Some(tui::MenuAction::Select(1)) if roots.len() > 1 => {
+                            let mut next_roots = roots.clone();
+                            next_roots.remove(*root_idx);
+                            LoopAction::ReplaceConfigRoots {
+                                roots: next_roots,
+                                initial_setup: *initial_setup,
+                            }
+                        }
+                        Some(tui::MenuAction::Back) => LoopAction::Pop,
+                        Some(tui::MenuAction::Quit) => LoopAction::Exit,
+                        _ => LoopAction::None,
+                    }
+                }
+                Page::ConfigProjectRootInput {
+                    roots,
+                    edit_idx,
+                    initial_setup,
+                    input,
                 } => {
                     terminal.draw(|frame| input.render(frame))?;
                     match input.handle_key_event() {
                         Some(tui::InputAction::Submit(value)) => {
                             match validate_directory_input(&value, true) {
-                                Ok(projects_root) => LoopAction::Push(
-                                    self.config_worktrees_root_page(projects_root, *initial_setup),
-                                ),
+                                Ok(projects_root) => {
+                                    let mut next_roots = roots.clone();
+                                    if let Some(index) = edit_idx {
+                                        next_roots[*index] = projects_root;
+                                    } else {
+                                        next_roots.push(projects_root);
+                                    }
+                                    LoopAction::ReplaceConfigRoots {
+                                        roots: dedupe_project_roots(next_roots),
+                                        initial_setup: *initial_setup,
+                                    }
+                                }
                                 Err(err) => {
                                     input.error = Some(err.to_string());
                                     LoopAction::None
@@ -328,27 +431,20 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::InputAction::PickFolder) => {
-                            if let Some(path) = choose_folder_with_dialog("请选择项目根目录")
-                            {
+                            if let Some(path) = choose_folder_with_dialog("请选择项目根目录") {
                                 input.value = path.to_string_lossy().to_string();
                                 input.cursor_pos = input.value.len();
                                 input.error = None;
                             }
                             LoopAction::None
                         }
-                        Some(tui::InputAction::Back) => {
-                            if *initial_setup {
-                                LoopAction::Exit
-                            } else {
-                                LoopAction::Pop
-                            }
-                        }
+                        Some(tui::InputAction::Back) => LoopAction::Pop,
                         Some(tui::InputAction::Quit) => LoopAction::Exit,
                         None => LoopAction::None,
                     }
                 }
                 Page::ConfigWorktreesRoot {
-                    projects_root,
+                    project_roots,
                     input,
                     initial_setup,
                 } => {
@@ -357,7 +453,7 @@ impl FullScreenApp {
                         Some(tui::InputAction::Submit(value)) => {
                             match validate_directory_input(&value, false) {
                                 Ok(worktrees_root) => match self.config_ide_page(
-                                    projects_root.clone(),
+                                    project_roots.clone(),
                                     worktrees_root,
                                     *initial_setup,
                                 ) {
@@ -393,7 +489,7 @@ impl FullScreenApp {
                     }
                 }
                 Page::ConfigIdeSelect {
-                    projects_root,
+                    project_roots,
                     worktrees_root,
                     initial_setup,
                     options,
@@ -403,7 +499,7 @@ impl FullScreenApp {
                     match menu.handle_key_event() {
                         Some(tui::MenuAction::Select(index)) => {
                             match self.apply_config(
-                                projects_root.clone(),
+                                project_roots.clone(),
                                 worktrees_root.clone(),
                                 options[index].clone(),
                             ) {
@@ -755,6 +851,22 @@ impl FullScreenApp {
                         return Ok(());
                     }
                 }
+                LoopAction::ReplaceConfigRoots {
+                    roots,
+                    initial_setup,
+                } => {
+                    while matches!(
+                        pages.last(),
+                        Some(
+                            Page::ConfigProjectsRoots { .. }
+                                | Page::ConfigProjectRootActions { .. }
+                                | Page::ConfigProjectRootInput { .. }
+                        )
+                    ) {
+                        pages.pop();
+                    }
+                    pages.push(self.config_projects_roots_page(roots, initial_setup));
+                }
                 LoopAction::ResetToMain => {
                     if matches!(pages.first(), Some(Page::MainMenu(_))) {
                         pages.truncate(1);
@@ -793,32 +905,127 @@ impl FullScreenApp {
     }
 
     fn config_projects_root_page(&self, initial_setup: bool) -> Page {
+        self.config_projects_roots_page(self.config.projects_root_dirs.clone(), initial_setup)
+    }
+
+    fn config_projects_roots_page(&self, roots: Vec<PathBuf>, initial_setup: bool) -> Page {
         let subtitle = if initial_setup {
-            "首次启动：先设置包含多个 Git 仓库的项目根目录"
+            "首次启动：管理一个或多个项目根目录"
         } else {
-            "更新项目根目录"
+            "管理项目根目录列表"
         };
-        Page::ConfigProjectsRoot {
+        let mut items: Vec<String> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| format!("目录 {}: {}", index + 1, root_label(root)))
+            .collect();
+        let mut details: Vec<Vec<String>> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                vec![
+                    format!("完整路径: {}", root.display()),
+                    if index == 0 {
+                        "默认扫描顺序中的第一个目录。".to_string()
+                    } else {
+                        "会和其他项目根目录一起参与扫描。".to_string()
+                    },
+                ]
+            })
+            .collect();
+
+        items.push("新增项目根目录".to_string());
+        details.push(vec!["添加新的项目来源目录。".to_string()]);
+
+        if !roots.is_empty() {
+            items.push("继续".to_string());
+            details.push(vec![
+                format!("当前共配置 {} 个项目根目录。", roots.len()),
+                "下一步设置 Worktree 根目录。".to_string(),
+            ]);
+        }
+
+        Page::ConfigProjectsRoots {
+            roots,
+            initial_setup,
+            menu: tui::MenuState::new("gwtm / 项目目录", subtitle, items)
+                .with_details(details)
+                .with_search("过滤项目根目录"),
+        }
+    }
+
+    fn config_project_root_actions_page(
+        &self,
+        roots: Vec<PathBuf>,
+        root_idx: usize,
+        initial_setup: bool,
+    ) -> Page {
+        let root = &roots[root_idx];
+        let mut items = vec!["编辑路径".to_string()];
+        let mut details = vec![vec![
+            format!("当前路径: {}", root.display()),
+            "重新选择或修改这个项目根目录。".to_string(),
+        ]];
+        if roots.len() > 1 {
+            items.push("删除目录".to_string());
+            details.push(vec![
+                format!("当前路径: {}", root.display()),
+                "从扫描列表里移除这个项目根目录。".to_string(),
+            ]);
+        }
+
+        Page::ConfigProjectRootActions {
+            roots,
+            root_idx,
+            initial_setup,
+            menu: tui::MenuState::new(
+                "gwtm / 项目目录操作",
+                "选择要对这个项目根目录执行的操作",
+                items,
+            )
+            .with_details(details),
+        }
+    }
+
+    fn config_project_root_input_page(
+        &self,
+        roots: Vec<PathBuf>,
+        edit_idx: Option<usize>,
+        initial_setup: bool,
+    ) -> Page {
+        let (subtitle, value) = match edit_idx {
+            Some(index) => (
+                "更新一个已有的项目根目录",
+                roots[index].to_string_lossy().to_string(),
+            ),
+            None => (
+                "添加一个新的项目根目录，其一级子目录应为 Git 仓库",
+                String::new(),
+            ),
+        };
+        Page::ConfigProjectRootInput {
+            roots,
+            edit_idx,
             initial_setup,
             input: tui::InputState::new(
-                "gwtm / 配置项目目录",
+                "gwtm / 编辑项目目录",
                 subtitle,
                 "输入项目根目录路径",
-                &self.config.projects_root_dir.to_string_lossy(),
+                &value,
             )
             .with_file_picker(),
         }
     }
 
-    fn config_worktrees_root_page(&self, projects_root: PathBuf, initial_setup: bool) -> Page {
-        let default_worktrees_root = self.default_worktrees_root_input(&projects_root);
+    fn config_worktrees_root_page(&self, project_roots: Vec<PathBuf>, initial_setup: bool) -> Page {
+        let default_worktrees_root = self.default_worktrees_root_input(&project_roots);
         let subtitle = if initial_setup {
             "设置 Worktree 根目录，不存在会自动创建"
         } else {
             "更新 Worktree 根目录，不存在会自动创建"
         };
         Page::ConfigWorktreesRoot {
-            projects_root,
+            project_roots,
             initial_setup,
             input: tui::InputState::new(
                 "gwtm / 配置 Worktree 目录",
@@ -832,7 +1039,7 @@ impl FullScreenApp {
 
     fn config_ide_page(
         &self,
-        projects_root: PathBuf,
+        project_roots: Vec<PathBuf>,
         worktrees_root: PathBuf,
         initial_setup: bool,
     ) -> Result<Page> {
@@ -853,7 +1060,7 @@ impl FullScreenApp {
         menu.list_state.select(Some(default_index));
 
         Ok(Page::ConfigIdeSelect {
-            projects_root,
+            project_roots,
             worktrees_root,
             initial_setup,
             options,
@@ -861,18 +1068,22 @@ impl FullScreenApp {
         })
     }
 
-    fn default_worktrees_root_input(&self, projects_root: &Path) -> PathBuf {
-        let current_default = derive_default_worktrees_root(&self.config.projects_root_dir);
+    fn default_worktrees_root_input(&self, project_roots: &[PathBuf]) -> PathBuf {
+        let current_default = derive_default_worktrees_root(self.config.primary_projects_root());
+        let next_primary = project_roots
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or_else(|| self.config.primary_projects_root());
         if self.config.worktrees_root_dir == current_default {
-            derive_default_worktrees_root(projects_root)
+            derive_default_worktrees_root(next_primary)
         } else {
             self.config.worktrees_root_dir.clone()
         }
     }
 
-    fn config_with_paths(&self, projects_root: PathBuf, worktrees_root: PathBuf) -> AppConfig {
+    fn config_with_paths(&self, project_roots: Vec<PathBuf>, worktrees_root: PathBuf) -> AppConfig {
         AppConfig {
-            projects_root_dir: projects_root,
+            projects_root_dirs: project_roots,
             worktrees_root_dir: worktrees_root,
             ide_mode: self.config.ide_mode.clone(),
             ide_command: self.config.ide_command.clone(),
@@ -882,14 +1093,14 @@ impl FullScreenApp {
 
     fn apply_config(
         &mut self,
-        projects_root: PathBuf,
+        project_roots: Vec<PathBuf>,
         worktrees_root: PathBuf,
         ide: IdeOption,
     ) -> Result<Vec<String>> {
         fs::create_dir_all(&worktrees_root)
             .with_context(|| format!("创建 worktree 根目录失败: {}", worktrees_root.display()))?;
 
-        let mut new_config = self.config_with_paths(projects_root.clone(), worktrees_root.clone());
+        let mut new_config = self.config_with_paths(project_roots.clone(), worktrees_root.clone());
         new_config.ide_mode = ide.mode;
         new_config.ide_command = ide.command;
         new_config.ide_label = ide.label;
@@ -900,7 +1111,15 @@ impl FullScreenApp {
 
         Ok(vec![
             "[SUCCESS] 配置已保存".to_string(),
-            format!("项目根目录: {}", projects_root.display()),
+            format!("项目根目录数量: {}", project_roots.len()),
+            format!(
+                "项目根目录: {}",
+                project_roots
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
             format!("Worktree 根目录: {}", worktrees_root.display()),
             format!(
                 "IDE: {}",
@@ -960,16 +1179,21 @@ impl FullScreenApp {
     }
 
     fn project_select_page(&mut self, intent: ProjectIntent) -> Result<Page> {
-        self.projects = scan_projects(&self.config.projects_root_dir)?;
+        self.projects = scan_projects(&self.config.projects_root_dirs)?;
         let items: Vec<String> = self
             .projects
             .iter()
-            .map(|project| project.name.clone())
+            .map(|project| project.display_name.clone())
             .collect();
         let details: Vec<Vec<String>> = self
             .projects
             .iter()
-            .map(|project| vec![format!("路径: {}", project.path.display())])
+            .map(|project| {
+                vec![
+                    format!("仓库路径: {}", project.path.display()),
+                    format!("来源目录: {}", project.source_root.display()),
+                ]
+            })
             .collect();
         let subtitle = match intent {
             ProjectIntent::Create => "选择一个仓库来创建 worktree",
@@ -1572,7 +1796,8 @@ fn load_or_prepare_config(config_path: &Path) -> Result<(AppConfig, bool)> {
 fn load_config(config_path: &Path) -> Result<AppConfig> {
     let content = fs::read_to_string(config_path)
         .with_context(|| format!("读取配置文件失败: {}", config_path.display()))?;
-    toml::from_str(&content).context("解析配置文件失败")
+    let value: toml::Value = toml::from_str(&content).context("解析配置文件失败")?;
+    parse_app_config(value)
 }
 
 fn save_config(config_path: &Path, config: &AppConfig) -> Result<()> {
@@ -1587,7 +1812,16 @@ fn save_config(config_path: &Path, config: &AppConfig) -> Result<()> {
 }
 
 fn normalize_config(config: &mut AppConfig) -> Result<()> {
-    config.projects_root_dir = normalize_path(&config.projects_root_dir)?;
+    if config.projects_root_dirs.is_empty() {
+        bail!("至少需要配置一个项目根目录");
+    }
+    config.projects_root_dirs = dedupe_project_roots(
+        config
+            .projects_root_dirs
+            .iter()
+            .map(|path| normalize_path(path))
+            .collect::<Result<Vec<_>>>()?,
+    );
     config.worktrees_root_dir = normalize_path(&config.worktrees_root_dir)?;
     if config.ide_mode.is_empty() {
         config.ide_mode = PROMPT_IDE_MODE.to_string();
@@ -1621,6 +1855,39 @@ fn normalize_config(config: &mut AppConfig) -> Result<()> {
     Ok(())
 }
 
+fn parse_app_config(value: toml::Value) -> Result<AppConfig> {
+    #[derive(Deserialize)]
+    struct ConfigCompat {
+        #[serde(default)]
+        projects_root_dirs: Vec<PathBuf>,
+        #[serde(default)]
+        projects_root_dir: Option<PathBuf>,
+        worktrees_root_dir: PathBuf,
+        #[serde(default)]
+        ide_mode: String,
+        #[serde(default)]
+        ide_command: String,
+        #[serde(default)]
+        ide_label: String,
+    }
+
+    let compat: ConfigCompat = value.try_into().context("解析配置文件失败")?;
+    let mut projects_root_dirs = compat.projects_root_dirs;
+    if projects_root_dirs.is_empty() {
+        if let Some(legacy_root) = compat.projects_root_dir {
+            projects_root_dirs.push(legacy_root);
+        }
+    }
+
+    Ok(AppConfig {
+        projects_root_dirs,
+        worktrees_root_dir: compat.worktrees_root_dir,
+        ide_mode: compat.ide_mode,
+        ide_command: compat.ide_command,
+        ide_label: compat.ide_label,
+    })
+}
+
 fn normalize_path(input: &Path) -> Result<PathBuf> {
     let raw = input.to_string_lossy();
     let expanded = if raw == "~" {
@@ -1640,6 +1907,24 @@ fn normalize_path(input: &Path) -> Result<PathBuf> {
     } else {
         Ok(expanded)
     }
+}
+
+fn dedupe_project_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for root in roots {
+        if seen.insert(root.clone()) {
+            deduped.push(root);
+        }
+    }
+    deduped
+}
+
+fn root_label(path: &Path) -> String {
+    path.file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn derive_default_worktrees_root(projects_root: &Path) -> PathBuf {
@@ -1883,35 +2168,72 @@ fn validate_directory_input(value: &str, must_exist: bool) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn scan_projects(projects_root_dir: &Path) -> Result<Vec<Project>> {
-    if !projects_root_dir.is_dir() {
-        bail!("项目根目录不存在: {}", projects_root_dir.display());
+fn scan_projects(projects_root_dirs: &[PathBuf]) -> Result<Vec<Project>> {
+    if projects_root_dirs.is_empty() {
+        bail!("至少需要配置一个项目根目录。请进入“重新配置”添加。");
     }
 
+    let mut seen = std::collections::HashSet::new();
     let mut projects = Vec::new();
-    for entry in fs::read_dir(projects_root_dir)
-        .with_context(|| format!("读取项目根目录失败: {}", projects_root_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    for projects_root_dir in projects_root_dirs {
+        if !projects_root_dir.is_dir() {
+            bail!("项目根目录不存在: {}", projects_root_dir.display());
         }
-        if path.join(".git").exists() {
-            let name = path
+
+        for entry in fs::read_dir(projects_root_dir)
+            .with_context(|| format!("读取项目根目录失败: {}", projects_root_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if !path.join(".git").exists() {
+                continue;
+            }
+            let canonical = path
+                .canonicalize()
+                .with_context(|| format!("规范化项目路径失败: {}", path.display()))?;
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            let name = canonical
                 .file_name()
                 .map(|v| v.to_string_lossy().to_string())
-                .ok_or_else(|| anyhow!("项目目录名称无效: {}", path.display()))?;
-            projects.push(Project { name, path });
+                .ok_or_else(|| anyhow!("项目目录名称无效: {}", canonical.display()))?;
+            projects.push(Project {
+                display_name: name.clone(),
+                name,
+                path: canonical,
+                source_root: projects_root_dir.clone(),
+            });
         }
     }
 
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut counts = std::collections::HashMap::new();
+    for project in &projects {
+        *counts.entry(project.name.clone()).or_insert(0usize) += 1;
+    }
+    for project in &mut projects {
+        if counts.get(&project.name).copied().unwrap_or(0) > 1 {
+            project.display_name = format!("{} ({})", project.name, root_label(&project.source_root));
+        }
+    }
 
     if projects.is_empty() {
         bail!(
-            "在目录 {} 中未找到任何 Git 仓库。请确认你的项目目录结构或重新配置。",
-            projects_root_dir.display()
+            "在这些目录中未找到任何 Git 仓库：{}。请确认项目目录结构或重新配置。",
+            projects_root_dirs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" | ")
         );
     }
 
@@ -2080,6 +2402,7 @@ fn run_git_capture(project_path: &Path, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn branch_name_is_mapped_to_directory_name() {
@@ -2106,5 +2429,52 @@ branch refs/heads/feat/a
         assert_eq!(entries[1].path, PathBuf::from("/tmp/worktrees/repo/feat-a"));
         assert_eq!(entries[1].branch.as_deref(), Some("feat/a"));
         assert_eq!(entries[1].head, "def456");
+    }
+
+    #[test]
+    fn load_legacy_single_root_config() {
+        let value: toml::Value = toml::from_str(
+            r#"
+projects_root_dir = "/tmp/code"
+worktrees_root_dir = "/tmp/worktrees"
+ide_mode = "app"
+ide_command = "IntelliJ IDEA"
+ide_label = "IntelliJ IDEA"
+"#,
+        )
+        .expect("toml should parse");
+
+        let config = parse_app_config(value).expect("legacy config should parse");
+        assert_eq!(config.projects_root_dirs, vec![PathBuf::from("/tmp/code")]);
+        assert_eq!(config.worktrees_root_dir, PathBuf::from("/tmp/worktrees"));
+    }
+
+    #[test]
+    fn scan_projects_across_multiple_roots() {
+        let base = env::temp_dir().join(format!(
+            "gwtm-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        let root_a = base.join("code-a");
+        let root_b = base.join("code-b");
+        let alpha = root_a.join("alpha");
+        let beta = root_b.join("beta");
+
+        fs::create_dir_all(alpha.join(".git")).expect("alpha git dir should be created");
+        fs::create_dir_all(beta.join(".git")).expect("beta git dir should be created");
+
+        let projects =
+            scan_projects(&[root_a.clone(), root_b.clone()]).expect("scan should succeed");
+
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].name, "alpha");
+        assert_eq!(projects[0].source_root, root_a);
+        assert_eq!(projects[1].name, "beta");
+        assert_eq!(projects[1].source_root, root_b);
+
+        fs::remove_dir_all(base).expect("temp test tree should be removed");
     }
 }

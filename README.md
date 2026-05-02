@@ -6,7 +6,7 @@
 
 ## What It Does
 
-- Scans a configured projects root and finds Git repositories in its direct subdirectories
+- Scans one or more configured project roots and finds Git repositories in their direct subdirectories
 - Creates, opens, lists, and removes Git worktrees
 - Provides a fullscreen TUI for first-run setup and later reconfiguration
 - Supports searchable project, branch, and worktree pickers
@@ -84,11 +84,11 @@ brew install life2you/tap/gwtm
 
 On first launch, `gwtm` asks for:
 
-1. `projects_root_dir`: a folder whose direct children are Git repositories
+1. `projects_root_dirs`: one or more folders whose direct children are Git repositories
 2. `worktrees_root_dir`: where created worktrees should be stored
 3. the IDE or launcher that should open worktrees
 
-The configuration flow runs in the same fullscreen TUI used by the main menu. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly, or skip IDE setup and pick one the first time you open a worktree.
+The configuration flow runs in the same fullscreen TUI used by the main menu. You can add, edit, and remove project roots from a dedicated list instead of entering them as a single line. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly, or skip IDE setup and pick one the first time you open a worktree.
 
 Config is saved to:
 
@@ -99,7 +99,7 @@ Config is saved to:
 Example:
 
 ```toml
-projects_root_dir = "/Users/you/code"
+projects_root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 worktrees_root_dir = "/Users/you/worktrees"
 ide_mode = "app"
 ide_command = "IntelliJ IDEA"
@@ -117,6 +117,7 @@ ide_label = "IntelliJ IDEA"
 
 ## Notes
 
+- If multiple project roots contain repositories with the same name, `gwtm` shows the source root in the project picker to help you choose the correct one.
 - Worktrees are created under:
 
 ```text
