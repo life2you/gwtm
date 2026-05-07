@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -405,58 +405,66 @@ impl InputState {
 
     pub fn handle_key_event(&mut self) -> Option<InputAction> {
         if let Ok(Event::Key(key)) = event::read() {
-            if key.kind != KeyEventKind::Press {
-                return None;
+            return self.process_key_event(key);
+        }
+        None
+    }
+
+    fn process_key_event(&mut self, key: KeyEvent) -> Option<InputAction> {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Enter => {
+                if self.value.trim().is_empty() {
+                    self.error = Some("输入不能为空".to_string());
+                } else {
+                    return Some(InputAction::Submit(self.value.trim().to_string()));
+                }
             }
-            match key.code {
-                KeyCode::Enter => {
-                    if self.value.trim().is_empty() {
-                        self.error = Some("输入不能为空".to_string());
-                    } else {
-                        return Some(InputAction::Submit(self.value.trim().to_string()));
-                    }
-                }
-                KeyCode::Esc | KeyCode::Char('b') => return Some(InputAction::Back),
-                KeyCode::Char('q') => return Some(InputAction::Quit),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Some(InputAction::Quit);
-                }
-                KeyCode::Char('f') if self.file_picker_enabled => {
-                    return Some(InputAction::PickFolder);
-                }
-                KeyCode::Char(c) => {
-                    self.value.insert(self.cursor_pos, c);
-                    self.cursor_pos += 1;
+            KeyCode::Esc => return Some(InputAction::Back),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Some(InputAction::Quit);
+            }
+            KeyCode::Char('f')
+                if self.file_picker_enabled && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                return Some(InputAction::PickFolder);
+            }
+            KeyCode::Char(c) => {
+                self.value.insert(self.cursor_pos, c);
+                self.cursor_pos += 1;
+                self.error = None;
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                    self.value.remove(self.cursor_pos);
                     self.error = None;
                 }
-                KeyCode::Backspace => {
-                    if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
-                        self.value.remove(self.cursor_pos);
-                        self.error = None;
-                    }
-                }
-                KeyCode::Delete => {
-                    if self.cursor_pos < self.value.len() {
-                        self.value.remove(self.cursor_pos);
-                        self.error = None;
-                    }
-                }
-                KeyCode::Left => {
-                    if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
-                    }
-                }
-                KeyCode::Right => {
-                    if self.cursor_pos < self.value.len() {
-                        self.cursor_pos += 1;
-                    }
-                }
-                KeyCode::Home => self.cursor_pos = 0,
-                KeyCode::End => self.cursor_pos = self.value.len(),
-                _ => {}
             }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.value.len() {
+                    self.value.remove(self.cursor_pos);
+                    self.error = None;
+                }
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.value.len() {
+                    self.cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => self.cursor_pos = 0,
+            KeyCode::End => self.cursor_pos = self.value.len(),
+            _ => {}
         }
+
         None
     }
 
@@ -539,7 +547,7 @@ impl InputState {
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let picker_hint = if self.file_picker_enabled {
             vec![
-                Span::styled("f", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl+F", Style::default().fg(Color::DarkGray)),
                 Span::styled(" 选文件夹  ", Style::default().fg(Color::DarkGray)),
             ]
         } else {
@@ -554,14 +562,60 @@ impl InputState {
         spans.extend(vec![
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("b", Style::default().fg(Color::DarkGray)),
-            Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ctrl+C", Style::default().fg(Color::DarkGray)),
             Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
         ]);
 
         let footer = Paragraph::new(Line::from(spans));
         frame.render_widget(footer, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_state_accepts_b_and_q_as_text() {
+        let mut input = InputState::new("title", "subtitle", "label", "");
+
+        let action_b =
+            input.process_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        let action_q =
+            input.process_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        assert!(action_b.is_none());
+        assert!(action_q.is_none());
+        assert_eq!(input.value, "bq");
+    }
+
+    #[test]
+    fn input_state_uses_escape_for_back() {
+        let mut input = InputState::new("title", "subtitle", "label", "");
+
+        let action = input.process_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(InputAction::Back)));
+    }
+
+    #[test]
+    fn input_state_accepts_f_as_text_even_with_file_picker() {
+        let mut input = InputState::new("title", "subtitle", "label", "").with_file_picker();
+
+        let action = input.process_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert_eq!(input.value, "f");
+    }
+
+    #[test]
+    fn input_state_uses_ctrl_f_for_file_picker() {
+        let mut input = InputState::new("title", "subtitle", "label", "").with_file_picker();
+
+        let action =
+            input.process_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert!(matches!(action, Some(InputAction::PickFolder)));
     }
 }
 

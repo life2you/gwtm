@@ -88,7 +88,7 @@ On first launch, `gwtm` asks for:
 2. `worktrees_root_dir`: where created worktrees should be stored
 3. the IDE or launcher that should open worktrees
 
-The configuration flow runs in the same fullscreen TUI used by the main menu. You can add, edit, and remove project roots from a dedicated list instead of entering them as a single line. On macOS, press `f` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly, or skip IDE setup and pick one the first time you open a worktree.
+The configuration flow runs in the same fullscreen TUI used by the main menu. You can add, edit, and remove project roots from a dedicated list instead of entering them as a single line. On macOS, press `Ctrl+F` on a path field to open the system folder picker. After the paths are set, `gwtm` detects available IDE launchers and installed apps so you can choose one explicitly, or skip IDE setup and pick one the first time you open a worktree.
 
 Config is saved to:
 

@@ -382,13 +382,13 @@ impl FullScreenApp {
                 } => {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
-                        Some(tui::MenuAction::Select(0)) => LoopAction::Push(
-                            self.config_project_root_input_page(
+                        Some(tui::MenuAction::Select(0)) => {
+                            LoopAction::Push(self.config_project_root_input_page(
                                 roots.clone(),
                                 Some(*root_idx),
                                 *initial_setup,
-                            ),
-                        ),
+                            ))
+                        }
                         Some(tui::MenuAction::Select(1)) if roots.len() > 1 => {
                             let mut next_roots = roots.clone();
                             next_roots.remove(*root_idx);
@@ -431,7 +431,8 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::InputAction::PickFolder) => {
-                            if let Some(path) = choose_folder_with_dialog("请选择项目根目录") {
+                            if let Some(path) = choose_folder_with_dialog("请选择项目根目录")
+                            {
                                 input.value = path.to_string_lossy().to_string();
                                 input.cursor_pos = input.value.len();
                                 input.error = None;
@@ -2210,11 +2211,7 @@ fn scan_projects(projects_root_dirs: &[PathBuf]) -> Result<Vec<Project>> {
         }
     }
 
-    projects.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
 
     let mut counts = std::collections::HashMap::new();
     for project in &projects {
@@ -2222,7 +2219,8 @@ fn scan_projects(projects_root_dirs: &[PathBuf]) -> Result<Vec<Project>> {
     }
     for project in &mut projects {
         if counts.get(&project.name).copied().unwrap_or(0) > 1 {
-            project.display_name = format!("{} ({})", project.name, root_label(&project.source_root));
+            project.display_name =
+                format!("{} ({})", project.name, root_label(&project.source_root));
         }
     }
 
