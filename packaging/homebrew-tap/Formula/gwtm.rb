@@ -1,14 +1,23 @@
 class Gwtm < Formula
   desc "Git worktree manager for local multi-project workflows"
   homepage "https://github.com/life2you/gwtm"
-  url "https://github.com/life2you/gwtm/archive/refs/tags/v0.1.6.tar.gz"
-  sha256 "cbed880710d7eff86e1df57218e96b6d33fb21a215d18f288b91bf639ef98978"
+  version "0.1.6"
   license "MIT"
 
-  depends_on "rust" => :build
+  on_macos do
+    on_arm do
+      url "https://github.com/life2you/gwtm/releases/download/v0.1.6/gwtm-aarch64-apple-darwin.tar.gz"
+      sha256 "REPLACE_WITH_ARM64_SHA256"
+    end
+
+    on_intel do
+      url "https://github.com/life2you/gwtm/releases/download/v0.1.6/gwtm-x86_64-apple-darwin.tar.gz"
+      sha256 "REPLACE_WITH_X64_SHA256"
+    end
+  end
 
   def install
-    system "cargo", "install", *std_cargo_args(path: ".")
+    bin.install "gwtm"
   end
 
   test do
