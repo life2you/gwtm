@@ -1,17 +1,17 @@
 class Gwtm < Formula
   desc "Git worktree manager for local multi-project workflows"
   homepage "https://github.com/life2you/gwtm"
-  version "0.1.6"
+  version "0.1.7"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/life2you/gwtm/releases/download/v0.1.6/gwtm-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/life2you/gwtm/releases/download/v0.1.7/gwtm-aarch64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_ARM64_SHA256"
     end
 
     on_intel do
-      url "https://github.com/life2you/gwtm/releases/download/v0.1.6/gwtm-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/life2you/gwtm/releases/download/v0.1.7/gwtm-x86_64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_X64_SHA256"
     end
   end

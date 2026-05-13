@@ -242,7 +242,9 @@ impl FullScreenApp {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
                         Some(tui::MenuAction::Select(0)) => {
-                            match self.project_select_page(ProjectIntent::Create) {
+                            match self
+                                .project_select_page_with_progress(terminal, ProjectIntent::Create)
+                            {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
                                     LoopAction::Push(self.error_result_page("项目扫描失败", err))
@@ -250,7 +252,9 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Select(1)) => {
-                            match self.project_select_page(ProjectIntent::Open) {
+                            match self
+                                .project_select_page_with_progress(terminal, ProjectIntent::Open)
+                            {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
                                     LoopAction::Push(self.error_result_page("项目扫描失败", err))
@@ -258,7 +262,9 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Select(2)) => {
-                            match self.project_select_page(ProjectIntent::List) {
+                            match self
+                                .project_select_page_with_progress(terminal, ProjectIntent::List)
+                            {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
                                     LoopAction::Push(self.error_result_page("项目扫描失败", err))
@@ -266,7 +272,9 @@ impl FullScreenApp {
                             }
                         }
                         Some(tui::MenuAction::Select(3)) => {
-                            match self.project_select_page(ProjectIntent::Remove) {
+                            match self
+                                .project_select_page_with_progress(terminal, ProjectIntent::Remove)
+                            {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => {
                                     LoopAction::Push(self.error_result_page("项目扫描失败", err))
@@ -295,24 +303,30 @@ impl FullScreenApp {
                                     "feat/my-feature",
                                 ),
                             }),
-                            ProjectIntent::Open => match self.open_worktree_page(index) {
-                                Ok(page) => LoopAction::Push(page),
-                                Err(err) => LoopAction::Push(
-                                    self.error_result_page("读取 worktree 失败", err),
-                                ),
-                            },
-                            ProjectIntent::List => match self.worktree_list_page(index) {
-                                Ok(page) => LoopAction::Push(page),
-                                Err(err) => LoopAction::Push(
-                                    self.error_result_page("读取 worktree 失败", err),
-                                ),
-                            },
-                            ProjectIntent::Remove => match self.remove_worktree_page(index) {
-                                Ok(page) => LoopAction::Push(page),
-                                Err(err) => LoopAction::Push(
-                                    self.error_result_page("读取 worktree 失败", err),
-                                ),
-                            },
+                            ProjectIntent::Open => {
+                                match self.open_worktree_page_with_progress(terminal, index) {
+                                    Ok(page) => LoopAction::Push(page),
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("读取 worktree 失败", err),
+                                    ),
+                                }
+                            }
+                            ProjectIntent::List => {
+                                match self.worktree_list_page_with_progress(terminal, index) {
+                                    Ok(page) => LoopAction::Push(page),
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("读取 worktree 失败", err),
+                                    ),
+                                }
+                            }
+                            ProjectIntent::Remove => {
+                                match self.remove_worktree_page_with_progress(terminal, index) {
+                                    Ok(page) => LoopAction::Push(page),
+                                    Err(err) => LoopAction::Push(
+                                        self.error_result_page("读取 worktree 失败", err),
+                                    ),
+                                }
+                            }
                         },
                         Some(tui::MenuAction::Back) => LoopAction::Pop,
                         Some(tui::MenuAction::Quit) => LoopAction::Exit,
@@ -323,7 +337,11 @@ impl FullScreenApp {
                     terminal.draw(|frame| input.render(frame))?;
                     match input.handle_key_event() {
                         Some(tui::InputAction::Submit(branch_name)) => {
-                            match self.base_branch_page(*project_idx, branch_name) {
+                            match self.base_branch_page_with_progress(
+                                terminal,
+                                *project_idx,
+                                branch_name,
+                            ) {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => LoopAction::Push(
                                     self.error_result_page("读取远程分支失败", err),
@@ -453,7 +471,8 @@ impl FullScreenApp {
                     match input.handle_key_event() {
                         Some(tui::InputAction::Submit(value)) => {
                             match validate_directory_input(&value, false) {
-                                Ok(worktrees_root) => match self.config_ide_page(
+                                Ok(worktrees_root) => match self.config_ide_page_with_progress(
+                                    terminal,
                                     project_roots.clone(),
                                     worktrees_root,
                                     *initial_setup,
@@ -538,7 +557,8 @@ impl FullScreenApp {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
                         Some(tui::MenuAction::Select(index)) => {
-                            match self.create_worktree_with_lines(
+                            match self.create_worktree_with_progress(
+                                terminal,
                                 *project_idx,
                                 new_branch.clone(),
                                 base_branches[index].clone(),
@@ -566,7 +586,11 @@ impl FullScreenApp {
                         Some(tui::MenuAction::Select(0)) => {
                             if self.ide_is_configured() {
                                 let mut result_lines = lines.clone();
-                                match open_with_ide(&self.config, worktree_path) {
+                                match self.open_with_default_ide_with_progress(
+                                    terminal,
+                                    worktree_path,
+                                    "Worktree 已创建",
+                                ) {
                                     Ok(()) => result_lines.push(format!(
                                         "[SUCCESS] 已触发 {} 打开项目: {}",
                                         self.config.ide_label,
@@ -633,7 +657,12 @@ impl FullScreenApp {
                                 )))
                             } else {
                                 let mut result_lines = lines.clone();
-                                match open_with_ide_option(&selected, worktree_path) {
+                                match self.open_path_with_ide_with_progress(
+                                    terminal,
+                                    worktree_path,
+                                    &selected,
+                                    result_subtitle,
+                                ) {
                                     Ok(()) => {
                                         result_lines.push(format!(
                                             "[SUCCESS] 已触发 {} 打开项目: {}",
@@ -726,9 +755,11 @@ impl FullScreenApp {
                 } => {
                     terminal.draw(|frame| menu.render(frame))?;
                     match menu.handle_key_event() {
-                        Some(tui::MenuAction::Select(index)) => match self
-                            .open_worktree_action(*project_idx, worktrees[index].clone())
-                        {
+                        Some(tui::MenuAction::Select(index)) => match self.open_worktree_action(
+                            terminal,
+                            *project_idx,
+                            worktrees[index].clone(),
+                        ) {
                             Ok(action) => action,
                             Err(err) => {
                                 LoopAction::Push(self.error_result_page("打开 worktree 失败", err))
@@ -753,7 +784,8 @@ impl FullScreenApp {
                                     self.remove_local_branch_confirm_page(*project_idx, selected),
                                 )
                             } else {
-                                match self.remove_worktree_with_lines(
+                                match self.remove_worktree_with_progress(
+                                    terminal,
                                     *project_idx,
                                     selected,
                                     false,
@@ -787,6 +819,7 @@ impl FullScreenApp {
                         Some(tui::MenuAction::Select(index)) => {
                             let delete_local_branch = index == 0;
                             match self.next_remove_step(
+                                terminal,
                                 *project_idx,
                                 selected.clone(),
                                 delete_local_branch,
@@ -812,7 +845,8 @@ impl FullScreenApp {
                     match menu.handle_key_event() {
                         Some(tui::MenuAction::Select(index)) => {
                             let delete_remote_branch = index == 0;
-                            match self.remove_worktree_with_lines(
+                            match self.remove_worktree_with_progress(
+                                terminal,
                                 *project_idx,
                                 selected.clone(),
                                 *delete_local_branch,
@@ -1069,6 +1103,24 @@ impl FullScreenApp {
         })
     }
 
+    fn config_ide_page_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_roots: Vec<PathBuf>,
+        worktrees_root: PathBuf,
+        initial_setup: bool,
+    ) -> Result<Page> {
+        self.render_operation_progress(
+            terminal,
+            "正在检测 IDE",
+            &worktrees_root.display().to_string(),
+            1,
+            1,
+            "扫描本机可用 IDE",
+        )?;
+        self.config_ide_page(project_roots, worktrees_root, initial_setup)
+    }
+
     fn default_worktrees_root_input(&self, project_roots: &[PathBuf]) -> PathBuf {
         let current_default = derive_default_worktrees_root(self.config.primary_projects_root());
         let next_primary = project_roots
@@ -1210,6 +1262,29 @@ impl FullScreenApp {
         })
     }
 
+    fn project_select_page_with_progress(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        intent: ProjectIntent,
+    ) -> Result<Page> {
+        let summary = self
+            .config
+            .projects_root_dirs
+            .iter()
+            .map(|path| root_label(path))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        self.render_operation_progress(
+            terminal,
+            "正在扫描项目",
+            &summary,
+            1,
+            1,
+            "读取项目根目录中的 Git 仓库",
+        )?;
+        self.project_select_page(intent)
+    }
+
     fn base_branch_page(&self, project_idx: usize, new_branch: String) -> Result<Page> {
         let project = &self.projects[project_idx];
         let base_branches = remote_branches(&project.path)?;
@@ -1232,6 +1307,24 @@ impl FullScreenApp {
             base_branches,
             menu,
         })
+    }
+
+    fn base_branch_page_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+        new_branch: String,
+    ) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        self.render_operation_progress(
+            terminal,
+            "正在读取远程分支",
+            &format!("{} / {}", project.name, new_branch),
+            1,
+            1,
+            "加载 origin/* 作为基准分支候选",
+        )?;
+        self.base_branch_page(project_idx, new_branch)
     }
 
     fn open_worktree_page(&self, project_idx: usize) -> Result<Page> {
@@ -1300,6 +1393,23 @@ impl FullScreenApp {
         })
     }
 
+    fn open_worktree_page_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+    ) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        self.render_operation_progress(
+            terminal,
+            "正在读取 Worktree",
+            &project.name,
+            1,
+            1,
+            "加载可打开的 worktree 列表",
+        )?;
+        self.open_worktree_page(project_idx)
+    }
+
     fn worktree_list_page(&self, project_idx: usize) -> Result<Page> {
         let project = &self.projects[project_idx];
         let worktrees = read_worktrees(&project.path)?;
@@ -1324,6 +1434,23 @@ impl FullScreenApp {
             project.name.as_str(),
             lines,
         )))
+    }
+
+    fn worktree_list_page_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+    ) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        self.render_operation_progress(
+            terminal,
+            "正在读取 Worktree",
+            &project.name,
+            1,
+            1,
+            "整理当前仓库的 worktree 列表",
+        )?;
+        self.worktree_list_page(project_idx)
     }
 
     fn remove_worktree_page(&self, project_idx: usize) -> Result<Page> {
@@ -1382,6 +1509,23 @@ impl FullScreenApp {
         })
     }
 
+    fn remove_worktree_page_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+    ) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        self.render_operation_progress(
+            terminal,
+            "正在读取 Worktree",
+            &project.name,
+            1,
+            1,
+            "加载可删除的 worktree 列表",
+        )?;
+        self.remove_worktree_page(project_idx)
+    }
+
     fn remove_local_branch_confirm_page(
         &self,
         project_idx: usize,
@@ -1411,13 +1555,19 @@ impl FullScreenApp {
 
     fn next_remove_step(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         selected: WorktreeEntry,
         delete_local_branch: bool,
     ) -> Result<Page> {
         let Some(branch_name) = selected.branch.clone() else {
-            let lines =
-                self.remove_worktree_with_lines(project_idx, selected, delete_local_branch, false)?;
+            let lines = self.remove_worktree_with_progress(
+                terminal,
+                project_idx,
+                selected,
+                delete_local_branch,
+                false,
+            )?;
             return Ok(Page::Result(tui::ResultState::new(
                 "gwtm / 删除结果",
                 "删除流程已完成",
@@ -1448,8 +1598,13 @@ impl FullScreenApp {
                 ]),
             })
         } else {
-            let lines =
-                self.remove_worktree_with_lines(project_idx, selected, delete_local_branch, false)?;
+            let lines = self.remove_worktree_with_progress(
+                terminal,
+                project_idx,
+                selected,
+                delete_local_branch,
+                false,
+            )?;
             Ok(Page::Result(tui::ResultState::new(
                 "gwtm / 删除结果",
                 "删除流程已完成",
@@ -1491,8 +1646,30 @@ impl FullScreenApp {
         ))
     }
 
-    fn create_worktree_with_lines(
+    fn render_operation_progress(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        subtitle: &str,
+        summary: &str,
+        step: usize,
+        total_steps: usize,
+        detail: &str,
+    ) -> Result<()> {
+        let progress = tui::ProgressState::new(
+            "gwtm / 执行中",
+            subtitle,
+            step,
+            total_steps,
+            summary,
+            detail,
+        );
+        terminal.draw(|frame| progress.render(frame))?;
+        Ok(())
+    }
+
+    fn create_worktree_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         new_branch: String,
         base_branch: String,
@@ -1509,6 +1686,8 @@ impl FullScreenApp {
             bail!("Worktree 目录已存在: {}", worktree_path.display());
         }
 
+        let total_steps = 4usize;
+        let summary = format!("{} / {}", project.name, new_branch);
         let mut lines = vec![
             format!("[INFO] 项目: {}", project.name),
             format!("[INFO] 新分支: {new_branch}"),
@@ -1517,8 +1696,24 @@ impl FullScreenApp {
             "[INFO] 正在 fetch 远程仓库...".to_string(),
         ];
 
+        self.render_operation_progress(
+            terminal,
+            "正在创建 Worktree",
+            &summary,
+            1,
+            total_steps,
+            "fetch 远程仓库",
+        )?;
         run_git(&project.path, &["fetch", "origin"])?;
 
+        self.render_operation_progress(
+            terminal,
+            "正在创建 Worktree",
+            &summary,
+            2,
+            total_steps,
+            "准备 Worktree 目录",
+        )?;
         fs::create_dir_all(
             worktree_path
                 .parent()
@@ -1527,6 +1722,14 @@ impl FullScreenApp {
         .with_context(|| format!("创建 Worktree 父目录失败: {}", worktree_path.display()))?;
 
         lines.push("[INFO] 正在创建 worktree...".to_string());
+        self.render_operation_progress(
+            terminal,
+            "正在创建 Worktree",
+            &summary,
+            3,
+            total_steps,
+            "创建 worktree 与本地分支",
+        )?;
         run_git(
             &project.path,
             &[
@@ -1540,6 +1743,14 @@ impl FullScreenApp {
         )?;
 
         lines.push("[INFO] 正在推送新分支到远程...".to_string());
+        self.render_operation_progress(
+            terminal,
+            "正在创建 Worktree",
+            &summary,
+            4,
+            total_steps,
+            "推送新分支到远程",
+        )?;
         if let Err(err) = run_git(&worktree_path, &["push", "-u", "origin", &new_branch]) {
             lines.push(format!(
                 "[WARNING] 推送远程分支失败，Worktree 已创建但未成功建立远程分支: {err}"
@@ -1560,11 +1771,12 @@ impl FullScreenApp {
 
     fn open_worktree_action(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         selected: WorktreeEntry,
     ) -> Result<LoopAction> {
         if self.ide_is_configured() {
-            let lines = self.open_worktree_with_lines(project_idx, selected)?;
+            let lines = self.open_worktree_with_progress(terminal, project_idx, selected)?;
             return Ok(LoopAction::Push(Page::Result(tui::ResultState::new(
                 "gwtm / 打开结果",
                 "Worktree 已打开",
@@ -1600,8 +1812,9 @@ impl FullScreenApp {
         )?))
     }
 
-    fn open_worktree_with_lines(
+    fn open_worktree_with_progress(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         selected: WorktreeEntry,
     ) -> Result<Vec<String>> {
@@ -1616,6 +1829,14 @@ impl FullScreenApp {
             "Worktree"
         };
 
+        self.render_operation_progress(
+            terminal,
+            "正在打开 Worktree",
+            &format!("{} / {}", project.name, branch),
+            1,
+            1,
+            &format!("调用 {} 打开目录", self.config.ide_label),
+        )?;
         open_with_ide(&self.config, &selected.path)?;
 
         Ok(vec![
@@ -1631,8 +1852,44 @@ impl FullScreenApp {
         ])
     }
 
-    fn remove_worktree_with_lines(
+    fn open_path_with_ide_with_progress(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_path: &Path,
+        ide: &IdeOption,
+        subtitle: &str,
+    ) -> Result<()> {
+        self.render_operation_progress(
+            terminal,
+            subtitle,
+            &project_path.display().to_string(),
+            1,
+            1,
+            &format!("调用 {} 打开目录", ide.label),
+        )?;
+        open_with_ide_option(ide, project_path)
+    }
+
+    fn open_with_default_ide_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_path: &Path,
+        subtitle: &str,
+    ) -> Result<()> {
+        self.render_operation_progress(
+            terminal,
+            subtitle,
+            &project_path.display().to_string(),
+            1,
+            1,
+            &format!("调用 {} 打开目录", self.config.ide_label),
+        )?;
+        open_with_ide(&self.config, project_path)
+    }
+
+    fn remove_worktree_with_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         selected: WorktreeEntry,
         delete_local_branch: bool,
@@ -1649,6 +1906,20 @@ impl FullScreenApp {
             lines.push(format!("分支: {branch}"));
         }
 
+        let total_steps =
+            1usize + usize::from(delete_local_branch) + usize::from(delete_remote_branch);
+        let summary = branch_name
+            .clone()
+            .unwrap_or_else(|| selected.path.display().to_string());
+        let mut current_step = 1usize;
+        self.render_operation_progress(
+            terminal,
+            "正在删除 Worktree",
+            &summary,
+            current_step,
+            total_steps,
+            "删除 Worktree 目录",
+        )?;
         if let Err(err) = run_git(
             &project.path,
             &["worktree", "remove", &selected.path.to_string_lossy()],
@@ -1673,6 +1944,15 @@ impl FullScreenApp {
             let branch = branch_name
                 .as_ref()
                 .ok_or_else(|| anyhow!("无法删除本地分支，当前 worktree 没有关联分支"))?;
+            current_step += 1;
+            self.render_operation_progress(
+                terminal,
+                "正在删除 Worktree",
+                &summary,
+                current_step,
+                total_steps,
+                &format!("删除本地分支 {branch}"),
+            )?;
             if let Err(err) = run_git(&project.path, &["branch", "-d", branch]) {
                 lines.push(format!("[WARNING] git branch -d 失败，尝试强制删除: {err}"));
                 run_git(&project.path, &["branch", "-D", branch])?;
@@ -1684,6 +1964,15 @@ impl FullScreenApp {
             let branch = branch_name
                 .as_ref()
                 .ok_or_else(|| anyhow!("无法删除远程分支，当前 worktree 没有关联分支"))?;
+            current_step += 1;
+            self.render_operation_progress(
+                terminal,
+                "正在删除 Worktree",
+                &summary,
+                current_step,
+                total_steps,
+                &format!("删除远程分支 origin/{branch}"),
+            )?;
             run_git(&project.path, &["push", "origin", "--delete", branch])?;
             lines.push(format!("[SUCCESS] 远程分支已删除: origin/{branch}"));
         }

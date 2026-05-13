@@ -626,6 +626,108 @@ pub struct ResultState {
     pub scroll: u16,
 }
 
+pub struct ProgressState {
+    pub title: String,
+    pub subtitle: String,
+    pub step: usize,
+    pub total_steps: usize,
+    pub summary: String,
+    pub detail: String,
+}
+
+impl ProgressState {
+    pub fn new(
+        title: &str,
+        subtitle: &str,
+        step: usize,
+        total_steps: usize,
+        summary: &str,
+        detail: &str,
+    ) -> Self {
+        Self {
+            title: title.to_string(),
+            subtitle: subtitle.to_string(),
+            step,
+            total_steps,
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
+    pub fn render(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Length(4),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        let header = Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("  {}", self.title),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("  {}", self.subtitle),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+        );
+        frame.render_widget(header, chunks[0]);
+
+        let progress_text = format!("  进度: {}/{}", self.step.max(1), self.total_steps.max(1));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                progress_text,
+                Style::default().fg(Color::Yellow),
+            ))),
+            chunks[1],
+        );
+
+        let gauge_ratio = if self.total_steps == 0 {
+            0.0
+        } else {
+            (self.step.min(self.total_steps) as f64) / (self.total_steps as f64)
+        };
+        let gauge = ratatui::widgets::Gauge::default()
+            .block(Block::default())
+            .gauge_style(Style::default().fg(Color::Cyan))
+            .ratio(gauge_ratio);
+        frame.render_widget(gauge, chunks[2]);
+
+        let detail = Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("  项目: {}", self.summary),
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                format!("  当前步骤: {}", self.detail),
+                Style::default().fg(Color::Rgb(153, 200, 200)),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
+        frame.render_widget(detail, chunks[3]);
+
+        let footer = Paragraph::new(Line::from(Span::styled(
+            "  正在执行，请稍候...",
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(footer, chunks[5]);
+    }
+}
+
 pub enum ResultAction {
     Back,
     Quit,
