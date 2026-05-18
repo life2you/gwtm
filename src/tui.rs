@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 pub struct MenuState {
     pub title: String,
@@ -374,6 +375,7 @@ pub struct InputState {
     pub error: Option<String>,
     pub cursor_pos: usize,
     pub file_picker_enabled: bool,
+    pub allow_empty: bool,
 }
 
 pub enum InputAction {
@@ -386,7 +388,7 @@ pub enum InputAction {
 impl InputState {
     pub fn new(title: &str, subtitle: &str, label: &str, placeholder: &str) -> Self {
         let value = placeholder.to_string();
-        let cursor_pos = value.len();
+        let cursor_pos = value.chars().count();
         Self {
             title: title.to_string(),
             subtitle: subtitle.to_string(),
@@ -395,11 +397,17 @@ impl InputState {
             error: None,
             cursor_pos,
             file_picker_enabled: false,
+            allow_empty: false,
         }
     }
 
     pub fn with_file_picker(mut self) -> Self {
         self.file_picker_enabled = true;
+        self
+    }
+
+    pub fn allow_empty(mut self) -> Self {
+        self.allow_empty = true;
         self
     }
 
@@ -410,6 +418,29 @@ impl InputState {
         None
     }
 
+    fn char_len(&self) -> usize {
+        self.value.chars().count()
+    }
+
+    fn byte_index_for_char(&self, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        self.value
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.value.len())
+    }
+
+    fn display_width_before_cursor(&self) -> usize {
+        self.value
+            .chars()
+            .take(self.cursor_pos)
+            .map(|ch| ch.width().unwrap_or(0))
+            .sum()
+    }
+
     fn process_key_event(&mut self, key: KeyEvent) -> Option<InputAction> {
         if key.kind != KeyEventKind::Press {
             return None;
@@ -417,7 +448,7 @@ impl InputState {
 
         match key.code {
             KeyCode::Enter => {
-                if self.value.trim().is_empty() {
+                if self.value.trim().is_empty() && !self.allow_empty {
                     self.error = Some("输入不能为空".to_string());
                 } else {
                     return Some(InputAction::Submit(self.value.trim().to_string()));
@@ -433,20 +464,23 @@ impl InputState {
                 return Some(InputAction::PickFolder);
             }
             KeyCode::Char(c) => {
-                self.value.insert(self.cursor_pos, c);
+                let byte_index = self.byte_index_for_char(self.cursor_pos);
+                self.value.insert(byte_index, c);
                 self.cursor_pos += 1;
                 self.error = None;
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
-                    self.value.remove(self.cursor_pos);
+                    let byte_index = self.byte_index_for_char(self.cursor_pos);
+                    self.value.remove(byte_index);
                     self.error = None;
                 }
             }
             KeyCode::Delete => {
-                if self.cursor_pos < self.value.len() {
-                    self.value.remove(self.cursor_pos);
+                if self.cursor_pos < self.char_len() {
+                    let byte_index = self.byte_index_for_char(self.cursor_pos);
+                    self.value.remove(byte_index);
                     self.error = None;
                 }
             }
@@ -456,12 +490,12 @@ impl InputState {
                 }
             }
             KeyCode::Right => {
-                if self.cursor_pos < self.value.len() {
+                if self.cursor_pos < self.char_len() {
                     self.cursor_pos += 1;
                 }
             }
             KeyCode::Home => self.cursor_pos = 0,
-            KeyCode::End => self.cursor_pos = self.value.len(),
+            KeyCode::End => self.cursor_pos = self.char_len(),
             _ => {}
         }
 
@@ -541,7 +575,10 @@ impl InputState {
         .block(Block::default());
 
         frame.render_widget(input, area);
-        frame.set_cursor_position((area.x + 2 + self.cursor_pos as u16, area.y));
+        frame.set_cursor_position((
+            area.x + 2 + self.display_width_before_cursor() as u16,
+            area.y,
+        ));
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
@@ -616,6 +653,54 @@ mod tests {
             input.process_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
 
         assert!(matches!(action, Some(InputAction::PickFolder)));
+    }
+
+    #[test]
+    fn input_state_can_submit_empty_value_when_allowed() {
+        let mut input = InputState::new("title", "subtitle", "label", "").allow_empty();
+
+        let action = input.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(InputAction::Submit(value)) if value.is_empty()));
+        assert!(input.error.is_none());
+    }
+
+    #[test]
+    fn input_state_handles_multibyte_characters_without_panicking() {
+        let mut input = InputState::new("title", "subtitle", "label", "");
+
+        let action =
+            input.process_key_event(KeyEvent::new(KeyCode::Char('测'), KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert_eq!(input.value, "测");
+        assert_eq!(input.cursor_pos, 1);
+    }
+
+    #[test]
+    fn input_state_backspace_removes_full_multibyte_character() {
+        let mut input = InputState::new("title", "subtitle", "label", "");
+        input.value = "测试a".to_string();
+        input.cursor_pos = input.char_len();
+
+        let action = input.process_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert_eq!(input.value, "测试");
+        assert_eq!(input.cursor_pos, 2);
+    }
+
+    #[test]
+    fn input_state_delete_removes_character_at_cursor() {
+        let mut input = InputState::new("title", "subtitle", "label", "");
+        input.value = "测a试".to_string();
+        input.cursor_pos = 1;
+
+        let action = input.process_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert_eq!(input.value, "测试");
+        assert_eq!(input.cursor_pos, 1);
     }
 }
 

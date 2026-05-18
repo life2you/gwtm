@@ -50,6 +50,19 @@ impl AppConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct WorktreeMetadataStore {
+    #[serde(default)]
+    descriptions: Vec<WorktreeDescription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorktreeDescription {
+    project_path: PathBuf,
+    branch: String,
+    description: String,
+}
+
 #[derive(Debug, Clone)]
 struct Project {
     name: String,
@@ -63,6 +76,7 @@ struct WorktreeEntry {
     path: PathBuf,
     head: String,
     branch: Option<String>,
+    description: Option<String>,
     bare: bool,
 }
 
@@ -90,6 +104,11 @@ enum Page {
     },
     BranchInput {
         project_idx: usize,
+        input: tui::InputState,
+    },
+    BranchDescriptionInput {
+        project_idx: usize,
+        new_branch: String,
         input: tui::InputState,
     },
     ConfigProjectsRoots {
@@ -124,6 +143,7 @@ enum Page {
     BaseBranchSelect {
         project_idx: usize,
         new_branch: String,
+        branch_description: Option<String>,
         base_branches: Vec<String>,
         menu: tui::MenuState,
     },
@@ -186,24 +206,27 @@ enum LoopAction {
 struct FullScreenApp {
     config: AppConfig,
     config_path: PathBuf,
+    metadata_path: PathBuf,
     projects: Vec<Project>,
     start_with_setup: bool,
 }
 
 impl FullScreenApp {
-    fn new(config: AppConfig, config_path: PathBuf) -> Self {
+    fn new(config: AppConfig, config_path: PathBuf, metadata_path: PathBuf) -> Self {
         Self {
             config,
             config_path,
+            metadata_path,
             projects: Vec::new(),
             start_with_setup: false,
         }
     }
 
-    fn new_for_setup(config: AppConfig, config_path: PathBuf) -> Self {
+    fn new_for_setup(config: AppConfig, config_path: PathBuf, metadata_path: PathBuf) -> Self {
         Self {
             config,
             config_path,
+            metadata_path,
             projects: Vec::new(),
             start_with_setup: true,
         }
@@ -336,11 +359,30 @@ impl FullScreenApp {
                 Page::BranchInput { project_idx, input } => {
                     terminal.draw(|frame| input.render(frame))?;
                     match input.handle_key_event() {
-                        Some(tui::InputAction::Submit(branch_name)) => {
+                        Some(tui::InputAction::Submit(branch_name)) => LoopAction::Push(
+                            self.branch_description_input_page(*project_idx, branch_name),
+                        ),
+                        Some(tui::InputAction::PickFolder) => LoopAction::None,
+                        Some(tui::InputAction::Back) => LoopAction::Pop,
+                        Some(tui::InputAction::Quit) => LoopAction::Exit,
+                        None => LoopAction::None,
+                    }
+                }
+                Page::BranchDescriptionInput {
+                    project_idx,
+                    new_branch,
+                    input,
+                } => {
+                    terminal.draw(|frame| input.render(frame))?;
+                    match input.handle_key_event() {
+                        Some(tui::InputAction::Submit(description)) => {
+                            let branch_description =
+                                (!description.is_empty()).then_some(description);
                             match self.base_branch_page_with_progress(
                                 terminal,
                                 *project_idx,
-                                branch_name,
+                                new_branch.clone(),
+                                branch_description,
                             ) {
                                 Ok(page) => LoopAction::Push(page),
                                 Err(err) => LoopAction::Push(
@@ -452,7 +494,7 @@ impl FullScreenApp {
                             if let Some(path) = choose_folder_with_dialog("请选择项目根目录")
                             {
                                 input.value = path.to_string_lossy().to_string();
-                                input.cursor_pos = input.value.len();
+                                input.cursor_pos = input.value.chars().count();
                                 input.error = None;
                             }
                             LoopAction::None
@@ -492,7 +534,7 @@ impl FullScreenApp {
                             if let Some(path) = choose_folder_with_dialog("请选择 Worktree 根目录")
                             {
                                 input.value = path.to_string_lossy().to_string();
-                                input.cursor_pos = input.value.len();
+                                input.cursor_pos = input.value.chars().count();
                                 input.error = None;
                             }
                             LoopAction::None
@@ -551,6 +593,7 @@ impl FullScreenApp {
                 Page::BaseBranchSelect {
                     project_idx,
                     new_branch,
+                    branch_description,
                     base_branches,
                     menu,
                 } => {
@@ -561,6 +604,7 @@ impl FullScreenApp {
                                 terminal,
                                 *project_idx,
                                 new_branch.clone(),
+                                branch_description.clone(),
                                 base_branches[index].clone(),
                             ) {
                                 Ok((lines, worktree_path)) => LoopAction::Push(
@@ -1304,6 +1348,7 @@ impl FullScreenApp {
         Ok(Page::BaseBranchSelect {
             project_idx,
             new_branch,
+            branch_description: None,
             base_branches,
             menu,
         })
@@ -1314,6 +1359,7 @@ impl FullScreenApp {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         new_branch: String,
+        branch_description: Option<String>,
     ) -> Result<Page> {
         let project = &self.projects[project_idx];
         self.render_operation_progress(
@@ -1324,12 +1370,35 @@ impl FullScreenApp {
             1,
             "加载 origin/* 作为基准分支候选",
         )?;
-        self.base_branch_page(project_idx, new_branch)
+        let mut page = self.base_branch_page(project_idx, new_branch)?;
+        if let Page::BaseBranchSelect {
+            branch_description: current_description,
+            ..
+        } = &mut page
+        {
+            *current_description = branch_description;
+        }
+        Ok(page)
+    }
+
+    fn branch_description_input_page(&self, project_idx: usize, new_branch: String) -> Page {
+        let project = &self.projects[project_idx];
+        Page::BranchDescriptionInput {
+            project_idx,
+            new_branch: new_branch.clone(),
+            input: tui::InputState::new(
+                "gwtm / 功能描述",
+                "可选填写当前分支的主要开发功能描述，回车可直接跳过",
+                format!("项目: {} / 分支: {new_branch}", project.name).as_str(),
+                "",
+            )
+            .allow_empty(),
+        }
     }
 
     fn open_worktree_page(&self, project_idx: usize) -> Result<Page> {
         let project = &self.projects[project_idx];
-        let worktrees: Vec<WorktreeEntry> = read_worktrees(&project.path)?
+        let worktrees: Vec<WorktreeEntry> = read_worktrees(&project.path, &self.metadata_path)?
             .into_iter()
             .filter(|entry| !entry.bare)
             .collect();
@@ -1347,37 +1416,11 @@ impl FullScreenApp {
 
         let items: Vec<String> = worktrees
             .iter()
-            .map(|entry| {
-                let branch = entry
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string());
-                if entry.path == project.path {
-                    format!("{branch} (主仓库)")
-                } else {
-                    branch
-                }
-            })
+            .map(|entry| worktree_list_label(entry, entry.path == project.path))
             .collect();
         let details: Vec<Vec<String>> = worktrees
             .iter()
-            .map(|entry| {
-                let branch = entry
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string());
-                let location = if entry.path == project.path {
-                    "主仓库"
-                } else {
-                    "Worktree"
-                };
-                vec![
-                    format!("类型: {location}"),
-                    format!("分支: {branch}"),
-                    format!("路径: {}", entry.path.display()),
-                    format!("提交: {}", entry.head),
-                ]
-            })
+            .map(|entry| worktree_detail_lines(entry, entry.path == project.path))
             .collect();
 
         Ok(Page::OpenWorktreeSelect {
@@ -1412,19 +1455,14 @@ impl FullScreenApp {
 
     fn worktree_list_page(&self, project_idx: usize) -> Result<Page> {
         let project = &self.projects[project_idx];
-        let worktrees = read_worktrees(&project.path)?;
+        let worktrees = read_worktrees(&project.path, &self.metadata_path)?;
         let mut lines = vec![format!("[INFO] 项目: {}", project.name)];
         for (index, worktree) in worktrees.iter().enumerate() {
-            let branch = worktree
-                .branch
-                .clone()
-                .unwrap_or_else(|| "(detached)".to_string());
-            let marker = if worktree.path == project.path {
-                " (主仓库)"
-            } else {
-                ""
-            };
-            lines.push(format!("{}. {}{}", index + 1, branch, marker));
+            lines.push(format!(
+                "{}. {}",
+                index + 1,
+                worktree_list_label(worktree, worktree.path == project.path)
+            ));
             lines.push(format!("   路径: {}", worktree.path.display()));
             lines.push(format!("   提交: {}", worktree.head));
         }
@@ -1455,7 +1493,7 @@ impl FullScreenApp {
 
     fn remove_worktree_page(&self, project_idx: usize) -> Result<Page> {
         let project = &self.projects[project_idx];
-        let removable: Vec<WorktreeEntry> = read_worktrees(&project.path)?
+        let removable: Vec<WorktreeEntry> = read_worktrees(&project.path, &self.metadata_path)?
             .into_iter()
             .filter(|entry| entry.path != project.path && !entry.bare)
             .collect();
@@ -1473,31 +1511,11 @@ impl FullScreenApp {
 
         let items: Vec<String> = removable
             .iter()
-            .map(|entry| {
-                format!(
-                    "{}",
-                    entry
-                        .branch
-                        .clone()
-                        .unwrap_or_else(|| "(detached)".to_string())
-                )
-            })
+            .map(|entry| worktree_list_label(entry, false))
             .collect();
         let details: Vec<Vec<String>> = removable
             .iter()
-            .map(|entry| {
-                vec![
-                    format!(
-                        "分支: {}",
-                        entry
-                            .branch
-                            .clone()
-                            .unwrap_or_else(|| "(detached)".to_string())
-                    ),
-                    format!("路径: {}", entry.path.display()),
-                    format!("提交: {}", entry.head),
-                ]
-            })
+            .map(|entry| worktree_detail_lines(entry, false))
             .collect();
 
         Ok(Page::RemoveWorktreeSelect {
@@ -1672,6 +1690,7 @@ impl FullScreenApp {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         new_branch: String,
+        branch_description: Option<String>,
         base_branch: String,
     ) -> Result<(Vec<String>, PathBuf)> {
         let project = &self.projects[project_idx];
@@ -1686,13 +1705,20 @@ impl FullScreenApp {
             bail!("Worktree 目录已存在: {}", worktree_path.display());
         }
 
-        let total_steps = 4usize;
+        let total_steps = 5usize;
         let summary = format!("{} / {}", project.name, new_branch);
         let mut lines = vec![
             format!("[INFO] 项目: {}", project.name),
             format!("[INFO] 新分支: {new_branch}"),
             format!("[INFO] 基准分支: origin/{base_branch}"),
             format!("[INFO] Worktree 路径: {}", worktree_path.display()),
+            format!(
+                "[INFO] 功能描述: {}",
+                branch_description
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("未填写")
+            ),
             "[INFO] 正在 fetch 远程仓库...".to_string(),
         ];
 
@@ -1742,12 +1768,40 @@ impl FullScreenApp {
             ],
         )?;
 
-        lines.push("[INFO] 正在推送新分支到远程...".to_string());
         self.render_operation_progress(
             terminal,
             "正在创建 Worktree",
             &summary,
             4,
+            total_steps,
+            if branch_description.is_some() {
+                "保存功能描述"
+            } else {
+                "跳过功能描述"
+            },
+        )?;
+        if let Some(description) = branch_description.as_deref() {
+            if let Err(err) = write_branch_description(
+                &self.metadata_path,
+                &project.path,
+                &new_branch,
+                description,
+            ) {
+                lines.push(format!("[WARNING] 功能描述保存失败: {err}"));
+            } else {
+                lines.push(format!("[SUCCESS] 功能描述已保存: {description}"));
+            }
+        } else {
+            clear_branch_description(&self.metadata_path, &project.path, &new_branch)?;
+            lines.push("[INFO] 未填写功能描述".to_string());
+        }
+
+        lines.push("[INFO] 正在推送新分支到远程...".to_string());
+        self.render_operation_progress(
+            terminal,
+            "正在创建 Worktree",
+            &summary,
+            5,
             total_steps,
             "推送新分支到远程",
         )?;
@@ -1957,6 +2011,7 @@ impl FullScreenApp {
                 lines.push(format!("[WARNING] git branch -d 失败，尝试强制删除: {err}"));
                 run_git(&project.path, &["branch", "-D", branch])?;
             }
+            clear_branch_description(&self.metadata_path, &project.path, branch)?;
             lines.push(format!("[SUCCESS] 本地分支已删除: {branch}"));
         }
 
@@ -2003,12 +2058,13 @@ fn run() -> Result<()> {
 
     ensure_git_available()?;
     let config_path = config_file_path()?;
+    let metadata_path = metadata_file_path(&config_path)?;
     let (config, needs_setup) = load_or_prepare_config(&config_path)?;
 
     if needs_setup {
-        FullScreenApp::new_for_setup(config, config_path).run()
+        FullScreenApp::new_for_setup(config, config_path, metadata_path).run()
     } else {
-        FullScreenApp::new(config, config_path).run()
+        FullScreenApp::new(config, config_path, metadata_path).run()
     }
 }
 
@@ -2071,6 +2127,13 @@ fn config_file_path() -> Result<PathBuf> {
 
     let home = dirs::home_dir().ok_or_else(|| anyhow!("无法定位 home 目录"))?;
     Ok(home.join(".config").join(APP_NAME).join("config.toml"))
+}
+
+fn metadata_file_path(config_path: &Path) -> Result<PathBuf> {
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("配置文件路径无效"))?;
+    Ok(parent.join("worktree-metadata.toml"))
 }
 
 fn load_or_prepare_config(config_path: &Path) -> Result<(AppConfig, bool)> {
@@ -2563,9 +2626,62 @@ fn branch_to_dirname(branch: &str) -> String {
     branch.replace('/', "-")
 }
 
-fn read_worktrees(project_path: &Path) -> Result<Vec<WorktreeEntry>> {
+fn worktree_branch_label(entry: &WorktreeEntry) -> String {
+    entry
+        .branch
+        .clone()
+        .unwrap_or_else(|| "(detached)".to_string())
+}
+
+fn worktree_list_label(entry: &WorktreeEntry, is_main_repo: bool) -> String {
+    let mut label = worktree_branch_label(entry);
+    if is_main_repo {
+        label.push_str(" (主仓库)");
+    }
+    if let Some(description) = entry.description.as_deref() {
+        if !description.trim().is_empty() {
+            label.push_str(" - ");
+            label.push_str(description.trim());
+        }
+    }
+    label
+}
+
+fn worktree_detail_lines(entry: &WorktreeEntry, is_main_repo: bool) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "类型: {}",
+            if is_main_repo {
+                "主仓库"
+            } else {
+                "Worktree"
+            }
+        ),
+        format!("分支: {}", worktree_branch_label(entry)),
+        format!("路径: {}", entry.path.display()),
+        format!("提交: {}", entry.head),
+    ];
+    if let Some(description) = entry.description.as_deref() {
+        if !description.trim().is_empty() {
+            lines.insert(2, format!("功能: {}", description.trim()));
+        }
+    }
+    lines
+}
+
+fn read_worktrees(project_path: &Path, metadata_path: &Path) -> Result<Vec<WorktreeEntry>> {
     let output = run_git_capture(project_path, &["worktree", "list", "--porcelain"])?;
-    parse_worktree_porcelain(&output)
+    let mut entries = parse_worktree_porcelain(&output)?;
+    let metadata = load_worktree_metadata_store(metadata_path)?;
+    for entry in &mut entries {
+        entry.description = entry
+            .branch
+            .as_deref()
+            .map(|branch| read_branch_description(&metadata, project_path, branch))
+            .transpose()?
+            .flatten();
+    }
+    Ok(entries)
 }
 
 fn parse_worktree_porcelain(input: &str) -> Result<Vec<WorktreeEntry>> {
@@ -2588,6 +2704,7 @@ fn parse_worktree_porcelain(input: &str) -> Result<Vec<WorktreeEntry>> {
                 path: PathBuf::from(path.trim()),
                 head: String::new(),
                 branch: None,
+                description: None,
                 bare: false,
             });
             continue;
@@ -2611,6 +2728,135 @@ fn parse_worktree_porcelain(input: &str) -> Result<Vec<WorktreeEntry>> {
     }
 
     Ok(entries)
+}
+
+fn load_worktree_metadata_store(metadata_path: &Path) -> Result<WorktreeMetadataStore> {
+    if !metadata_path.exists() {
+        return Ok(WorktreeMetadataStore::default());
+    }
+
+    let content = fs::read_to_string(metadata_path)
+        .with_context(|| format!("读取 Worktree 元数据失败: {}", metadata_path.display()))?;
+    toml::from_str(&content)
+        .with_context(|| format!("解析 Worktree 元数据失败: {}", metadata_path.display()))
+}
+
+fn save_worktree_metadata_store(
+    metadata_path: &Path,
+    metadata: &WorktreeMetadataStore,
+) -> Result<()> {
+    let parent = metadata_path
+        .parent()
+        .ok_or_else(|| anyhow!("Worktree 元数据文件路径无效"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建 Worktree 元数据目录失败: {}", parent.display()))?;
+    let content = toml::to_string_pretty(metadata).context("序列化 Worktree 元数据失败")?;
+    fs::write(metadata_path, content)
+        .with_context(|| format!("写入 Worktree 元数据失败: {}", metadata_path.display()))
+}
+
+fn write_branch_description(
+    metadata_path: &Path,
+    project_path: &Path,
+    branch: &str,
+    description: &str,
+) -> Result<()> {
+    let mut metadata = load_worktree_metadata_store(metadata_path)?;
+    let normalized_project = normalize_path(project_path)?;
+    let normalized_description = description.trim().to_string();
+    metadata
+        .descriptions
+        .retain(|entry| !(entry.project_path == normalized_project && entry.branch == branch));
+    metadata.descriptions.push(WorktreeDescription {
+        project_path: normalized_project,
+        branch: branch.to_string(),
+        description: normalized_description,
+    });
+    save_worktree_metadata_store(metadata_path, &metadata)?;
+    clear_legacy_branch_description(project_path, branch)?;
+    Ok(())
+}
+
+fn read_branch_description(
+    metadata: &WorktreeMetadataStore,
+    project_path: &Path,
+    branch: &str,
+) -> Result<Option<String>> {
+    let normalized_project = normalize_path(project_path)?;
+    if let Some(value) = metadata
+        .descriptions
+        .iter()
+        .find(|entry| entry.project_path == normalized_project && entry.branch == branch)
+        .map(|entry| entry.description.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(value));
+    }
+
+    read_legacy_branch_description(project_path, branch)
+}
+
+fn read_legacy_branch_description(project_path: &Path, branch: &str) -> Result<Option<String>> {
+    let key = format!("branch.{branch}.description");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .arg("config")
+        .arg("--get")
+        .arg(&key)
+        .output()
+        .with_context(|| format!("读取分支功能描述失败: {branch}"))?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!value.is_empty()).then_some(value));
+    }
+
+    if matches!(output.status.code(), Some(1)) {
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "git 命令执行失败: git -C {} config --get {}\n{}",
+        project_path.display(),
+        key,
+        stderr.trim()
+    );
+}
+
+fn clear_branch_description(metadata_path: &Path, project_path: &Path, branch: &str) -> Result<()> {
+    let mut metadata = load_worktree_metadata_store(metadata_path)?;
+    let normalized_project = normalize_path(project_path)?;
+    metadata
+        .descriptions
+        .retain(|entry| !(entry.project_path == normalized_project && entry.branch == branch));
+    save_worktree_metadata_store(metadata_path, &metadata)?;
+    clear_legacy_branch_description(project_path, branch)
+}
+
+fn clear_legacy_branch_description(project_path: &Path, branch: &str) -> Result<()> {
+    let key = format!("branch.{branch}.description");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .arg("config")
+        .arg("--unset")
+        .arg(&key)
+        .output()
+        .with_context(|| format!("清理分支功能描述失败: {branch}"))?;
+
+    if output.status.success() || matches!(output.status.code(), Some(5)) {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "git 命令执行失败: git -C {} config --unset {}\n{}",
+        project_path.display(),
+        key,
+        stderr.trim()
+    );
 }
 
 fn remote_branch_exists(project_path: &Path, branch: &str) -> Result<bool> {
@@ -2713,9 +2959,74 @@ branch refs/heads/feat/a
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, PathBuf::from("/tmp/repo"));
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert_eq!(entries[0].description, None);
         assert_eq!(entries[1].path, PathBuf::from("/tmp/worktrees/repo/feat-a"));
         assert_eq!(entries[1].branch.as_deref(), Some("feat/a"));
+        assert_eq!(entries[1].description, None);
         assert_eq!(entries[1].head, "def456");
+    }
+
+    #[test]
+    fn branch_description_is_stored_in_worktree_metadata() {
+        let base = env::temp_dir().join(format!(
+            "gwtm-desc-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("temp directory should be created");
+        run_git(&base, &["init"]).expect("git init should succeed");
+        let metadata_path = base.join(".gwtm-metadata.toml");
+
+        write_branch_description(&metadata_path, &base, "feat/test", "支持工作树描述")
+            .expect("description should be stored");
+        let metadata = load_worktree_metadata_store(&metadata_path).expect("metadata should load");
+        assert_eq!(
+            read_branch_description(&metadata, &base, "feat/test")
+                .expect("description should be readable"),
+            Some("支持工作树描述".to_string())
+        );
+        assert_eq!(metadata.descriptions.len(), 1);
+
+        clear_branch_description(&metadata_path, &base, "feat/test")
+            .expect("description should be cleared");
+        let metadata =
+            load_worktree_metadata_store(&metadata_path).expect("metadata should reload");
+        assert_eq!(
+            read_branch_description(&metadata, &base, "feat/test")
+                .expect("missing description should work"),
+            None
+        );
+    }
+
+    #[test]
+    fn branch_description_falls_back_to_legacy_git_config() {
+        let base = env::temp_dir().join(format!(
+            "gwtm-legacy-desc-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("temp directory should be created");
+        run_git(&base, &["init"]).expect("git init should succeed");
+        run_git(
+            &base,
+            &[
+                "config",
+                "branch.feat/test.description",
+                "来自旧版 git config 的描述",
+            ],
+        )
+        .expect("legacy description should be stored");
+
+        let metadata = WorktreeMetadataStore::default();
+        assert_eq!(
+            read_branch_description(&metadata, &base, "feat/test")
+                .expect("legacy description should be readable"),
+            Some("来自旧版 git config 的描述".to_string())
+        );
     }
 
     #[test]

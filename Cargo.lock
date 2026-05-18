@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "gwtm"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -184,6 +184,7 @@ dependencies = [
  "ratatui",
  "serde",
  "toml",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
