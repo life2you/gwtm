@@ -3,7 +3,7 @@ class Gwtm < Formula
   homepage "https://github.com/life2you/gwtm"
   version "0.1.8"
   url "https://github.com/life2you/gwtm/archive/refs/tags/v0.1.8.tar.gz"
-  sha256 "ed6d8849952e02df72a22216165e00c6e3cda3458f76b215206b6b011edcc13e"
+  sha256 "6e83881779d606f20098a8a097af39c5c46adef0509790213b167c43bb0d23e3"
   license "MIT"
 
   depends_on "rust" => :build
